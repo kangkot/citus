@@ -32,9 +32,9 @@ extern bool EnableRouterExecution;
 extern MultiPlan * CreateRouterPlan(Query *originalQuery, Query *query,
 									RelationRestrictionContext *restrictionContext);
 extern MultiPlan * CreateModifyPlan(Query *originalQuery, Query *query,
-									RelationRestrictionContext *restrictionContext);
+									RelationRestrictionContext *restrictionContext,
+									JoinRestrictionContext *joinRestrictionContext);
 
-extern void AddUninstantiatedPartitionRestriction(Query *originalQuery);
 extern DeferredErrorMessage * ModifyQuerySupported(Query *queryTree);
 extern Query * ReorderInsertSelectTargetLists(Query *originalQuery,
 											  RangeTblEntry *insertRte,

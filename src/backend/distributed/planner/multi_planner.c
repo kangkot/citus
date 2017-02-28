@@ -26,11 +26,15 @@
 #include "executor/executor.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "parser/parsetree.h"
+
+#include "optimizer/pathnode.h"
 #include "optimizer/planner.h"
 #include "utils/memutils.h"
 
 
 static List *relationRestrictionContextList = NIL;
+static List *joinRestrictionContextList = NIL;
 
 /* create custom scan methods for separate executors */
 static CustomScanMethods RealTimeCustomScanMethods = {
@@ -65,9 +69,12 @@ static PlannedStmt * FinalizeNonRouterPlan(PlannedStmt *localPlan, MultiPlan *mu
 										   CustomScan *customScan);
 static PlannedStmt * FinalizeRouterPlan(PlannedStmt *localPlan, CustomScan *customScan);
 static void CheckNodeIsDumpable(Node *node);
-static RelationRestrictionContext * CreateAndPushRestrictionContext(void);
+												  JoinRestrictionContext *
+												  joinRestrictionContext);
+static void CreateAndPushPlannerContexts(void);
 static RelationRestrictionContext * CurrentRestrictionContext(void);
-static void PopRestrictionContext(void);
+static JoinRestrictionContext * CurrentJoinRestrictionContext(void);
+static void PopRestrictionContexts(void);
 static bool HasUnresolvedExternParamsWalker(Node *expression, ParamListInfo boundParams);
 
 
@@ -78,7 +85,8 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	PlannedStmt *result = NULL;
 	bool needsDistributedPlanning = NeedsDistributedPlanning(parse);
 	Query *originalQuery = NULL;
-	RelationRestrictionContext *restrictionContext = NULL;
+	RelationRestrictionContext *relationRestrictionContext = NULL;
+	JoinRestrictionContext *joinRestrictionContext = NULL;
 
 	/*
 	 * standard_planner scribbles on it's input, but for deparsing we need the
@@ -87,31 +95,13 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	if (needsDistributedPlanning)
 	{
 		originalQuery = copyObject(parse);
-
-		/*
-		 * We implement INSERT INTO .. SELECT by pushing down the SELECT to
-		 * each shard. To compute that we use the router planner, by adding
-		 * an "uninstantiated" constraint that the partition column be equal to a
-		 * certain value. standard_planner() distributes that constraint to
-		 * the baserestrictinfos to all the tables where it knows how to push
-		 * the restriction safely. An example is that the tables that are
-		 * connected via equi joins.
-		 *
-		 * The router planner then iterates over the target table's shards,
-		 * for each we replace the "uninstantiated" restriction, with one that
-		 * PruneShardList() handles, and then generate a query for that
-		 * individual shard. If any of the involved tables don't prune down
-		 * to a single shard, or if the pruned shards aren't colocated,
-		 * we error out.
-		 */
-		if (InsertSelectQuery(parse))
-		{
-			AddUninstantiatedPartitionRestriction(parse);
-		}
 	}
 
 	/* create a restriction context and put it at the end if context list */
-	restrictionContext = CreateAndPushRestrictionContext();
+	CreateAndPushPlannerContexts();
+
+	relationRestrictionContext = CurrentRestrictionContext();
+	joinRestrictionContext = CurrentJoinRestrictionContext();
 
 	PG_TRY();
 	{
@@ -125,18 +115,19 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 		if (needsDistributedPlanning)
 		{
 			result = CreateDistributedPlan(result, originalQuery, parse,
-										   boundParams, restrictionContext);
+										   boundParams, relationRestrictionContext,
+										   joinRestrictionContext);
 		}
 	}
 	PG_CATCH();
 	{
-		PopRestrictionContext();
+		PopRestrictionContexts();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
 	/* remove the context from the context list */
-	PopRestrictionContext();
+	PopRestrictionContexts();
 
 	return result;
 }
@@ -187,7 +178,8 @@ IsModifyMultiPlan(MultiPlan *multiPlan)
 static PlannedStmt *
 CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query,
 					  ParamListInfo boundParams,
-					  RelationRestrictionContext *restrictionContext)
+					  RelationRestrictionContext *restrictionContext,
+					  JoinRestrictionContext *joinRestrictionContext)
 {
 	MultiPlan *distributedPlan = NULL;
 	PlannedStmt *resultPlan = NULL;
@@ -201,7 +193,9 @@ CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query
 	if (IsModifyCommand(query))
 	{
 		/* modifications are always routed through the same planner/executor */
-		distributedPlan = CreateModifyPlan(originalQuery, query, restrictionContext);
+		distributedPlan = CreateModifyPlan(originalQuery, query, restrictionContext,
+										   joinRestrictionContext);
+
 		Assert(distributedPlan);
 	}
 	else
@@ -561,6 +555,42 @@ CheckNodeIsDumpable(Node *node)
 
 
 /*
+ * multi_join_restriction_hook is a hook called by postgresql standard planner
+ * to notify us about various planning information regarding joins. We use
+ * it to learn about the joining column.
+ */
+void
+multi_join_restriction_hook(PlannerInfo *root,
+							RelOptInfo *joinrel,
+							RelOptInfo *outerrel,
+							RelOptInfo *innerrel,
+							JoinType jointype,
+							JoinPathExtraData *extra)
+{
+	JoinRestrictionContext *joinContext = NULL;
+	JoinRestriction *joinRestriction = palloc0(sizeof(JoinRestriction));
+	List *restrictInfoList = NIL;
+
+	/* we don't want to process anti joins and RTEs that are in the anti-joins */
+	if (jointype == JOIN_ANTI)
+	{
+		return;
+	}
+
+	restrictInfoList = extra->restrictlist;
+	joinContext = CurrentJoinRestrictionContext();
+	Assert(joinContext != NULL);
+
+	joinRestriction->joinType = jointype;
+	joinRestriction->joinRestrictInfoList = restrictInfoList;
+	joinRestriction->plannerInfo = root;
+
+	joinContext->joinRestrictionList =
+		lappend(joinContext->joinRestrictionList, joinRestriction);
+}
+
+
+/*
  * multi_relation_restriction_hook is a hook called by postgresql standard planner
  * to notify us about various planning information regarding a relation. We use
  * it to retrieve restrictions on relations.
@@ -616,22 +646,25 @@ multi_relation_restriction_hook(PlannerInfo *root, RelOptInfo *relOptInfo, Index
 
 
 /*
- * CreateAndPushRestrictionContext creates a new restriction context, inserts it to the
- * beginning of the context list, and returns the newly created context.
+ * CreateAndPushPlannerContextes creates a new restriction context and a new join context,
+ * inserts it to the beginning of the repective context lists.
  */
-static RelationRestrictionContext *
-CreateAndPushRestrictionContext(void)
+static void
+CreateAndPushPlannerContexts(void)
 {
 	RelationRestrictionContext *restrictionContext =
 		palloc0(sizeof(RelationRestrictionContext));
+
+	JoinRestrictionContext *joinContext =
+		palloc0(sizeof(JoinRestrictionContext));
 
 	/* we'll apply logical AND as we add tables */
 	restrictionContext->allReferenceTables = true;
 
 	relationRestrictionContextList = lcons(restrictionContext,
 										   relationRestrictionContextList);
-
-	return restrictionContext;
+	joinRestrictionContextList = lcons(joinContext,
+									   joinRestrictionContextList);
 }
 
 
@@ -654,13 +687,31 @@ CurrentRestrictionContext(void)
 
 
 /*
- * PopRestrictionContext removes the most recently added restriction context from
- * context list. The function assumes the list is not empty.
+ * CurrentRestrictionContext returns the the last restriction context from the
+ * list.
+ */
+static JoinRestrictionContext *
+CurrentJoinRestrictionContext(void)
+{
+	JoinRestrictionContext *joinContext = NULL;
+
+	Assert(joinRestrictionContextList != NIL);
+
+	joinContext = (JoinRestrictionContext *) linitial(joinRestrictionContextList);
+
+	return joinContext;
+}
+
+
+/*
+ * PopRestrictionContexts removes the most recently added restriction contexts from
+ * the restriction and join context lists. The function assumes the lists are not empty.
  */
 static void
-PopRestrictionContext(void)
+PopRestrictionContexts(void)
 {
 	relationRestrictionContextList = list_delete_first(relationRestrictionContextList);
+	joinRestrictionContextList = list_delete_first(joinRestrictionContextList);
 }
 
 
