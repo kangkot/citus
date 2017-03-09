@@ -188,6 +188,20 @@ multi_ProcessUtility(Node *parsetree,
 		return;
 	}
 
+	if (IsA(parsetree, AlterExtensionStmt))
+	{
+		/*
+		 * In CitusHasBeenLoaded check below, we compare binary Citus version and
+		 * extension version. If they are different, we force user to execute ALTER
+		 * EXTENSION citus UPDATE. Therefore, if user executes ALTER EXTENSION query
+		 * we should drop to the standart utility before CitusHasBeenLoaded check.
+		 */
+		standard_ProcessUtility(parsetree, queryString, context,
+								params, dest, completionTag);
+
+		return;
+	}
+
 	if (!CitusHasBeenLoaded())
 	{
 		/*

@@ -22,6 +22,7 @@
 #include "catalog/pg_extension.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
+#include "citus_version.h"
 #include "commands/extension.h"
 #include "commands/trigger.h"
 #include "distributed/colocation_utils.h"
@@ -35,6 +36,7 @@
 #include "distributed/shardinterval_utils.h"
 #include "distributed/worker_manager.h"
 #include "distributed/worker_protocol.h"
+#include "executor/spi.h"
 #include "parser/parse_func.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
@@ -98,6 +100,10 @@ static Oid distTransactionRelationId = InvalidOid;
 static Oid distTransactionGroupIndexId = InvalidOid;
 static Oid extraDataContainerFuncId = InvalidOid;
 
+/* Citus installed extension version */
+static char *citusAvailableVersion = NULL;
+static char *citusCatalogVersion = NULL;
+
 /* Hash table for informations about each partition */
 static HTAB *DistTableCacheHash = NULL;
 
@@ -133,6 +139,10 @@ static bool HasUniformHashDistribution(ShardInterval **shardIntervalArray,
 									   int shardIntervalArrayLength);
 static bool HasUninitializedShardInterval(ShardInterval **sortedShardIntervalArray,
 										  int shardCount);
+static bool CatalogVersionMatchesBinaryVersion(void);
+static bool AvailableVersionMatchesBinaryVersion(void);
+static char * CitusAvailableVersion(void);
+static char * CitusCatalogVersion(void);
 static void InitializeDistTableCache(void);
 static void InitializeWorkerNodeCache(void);
 static uint32 WorkerNodeHashCode(const void *key, Size keySize);
@@ -927,7 +937,7 @@ bool
 CitusHasBeenLoaded(void)
 {
 	/* recheck presence until citus has been loaded */
-	if (!extensionLoaded)
+	if (!extensionLoaded || creating_extension)
 	{
 		bool extensionPresent = false;
 		bool extensionScriptExecuted = true;
@@ -964,10 +974,78 @@ CitusHasBeenLoaded(void)
 			 * present during early stages of upgrade operation.
 			 */
 			DistPartitionRelationId();
+
+			/*
+			 * We also set citusCatalogVersion to NULL so that it will be re-read
+			 * in case of extension update.
+			 */
+			citusAvailableVersion = NULL;
+			citusCatalogVersion = NULL;
+		}
+	}
+
+	if (extensionLoaded)
+	{
+		/*
+		 * if (!AvailableVersionMatchesBinaryVersion())
+		 * {
+		 *  ereport(ERROR, (errmsg("citus binaries does not match available extension"),
+		 *                  (errdetail("Please restart the server"))));
+		 * }
+		 */
+		if (!CatalogVersionMatchesBinaryVersion())
+		{
+			ereport(ERROR, (errmsg("citus binaries does not match installed extension"),
+							(errdetail("Please update installed extension with "
+									   "ALTER EXTENSION citus UPDATE;"))));
 		}
 	}
 
 	return extensionLoaded;
+}
+
+
+/*
+ * AvailableVersionMatchesBinaryVersion compares binary version of the Citus and
+ * currently available version from citus.control file. If they are same in major and
+ * minor version numbers , this function returns true. It ignores the patch version.
+ */
+static bool
+AvailableVersionMatchesBinaryVersion()
+{
+	char *catalogVersion = CitusAvailableVersion();
+	const char patchVersionSeparator = '-';
+
+	int comparisionLimit = strchr(catalogVersion, patchVersionSeparator) - catalogVersion;
+
+	if (strncmp(catalogVersion, CITUS_BINARY_VERSION, comparisionLimit) == 0)
+	{
+		return true;
+	}
+
+	return false;
+}
+
+
+/*
+ * AvailableVersionMatchesBinaryVersion compares binary version of the Citus and
+ * catalog version from pg_extemsion catalog table. If they are same in major and
+ * minor version numbers , this function returns true. It ignores the patch version.
+ */
+static bool
+CatalogVersionMatchesBinaryVersion()
+{
+	char *catalogVersion = CitusCatalogVersion();
+	const char patchVersionSeparator = '-';
+
+	int comparisionLimit = strchr(catalogVersion, patchVersionSeparator) - catalogVersion;
+
+	if (strncmp(catalogVersion, CITUS_BINARY_VERSION, comparisionLimit) == 0)
+	{
+		return true;
+	}
+
+	return false;
 }
 
 
@@ -1243,6 +1321,129 @@ CitusExtensionOwnerName(void)
 	Oid superUserId = CitusExtensionOwner();
 
 	return GetUserNameFromId(superUserId, false);
+}
+
+
+/*
+ * CitusAvailableVersion returns the Citus version from citus.control file. It also
+ * saves the result, thus consecutive calls to CitusExtensionAvailableVersion will
+ * not read the catalog tables again.
+ */
+static char *
+CitusAvailableVersion(void)
+{
+	int spiConnectionResult = 0;
+	int spiQueryResult = 0;
+
+	HeapTuple tuple = NULL;
+	Datum extensionVersionDatum = 0;
+	bool columnNull = false;
+	bool readOnly = true;
+
+	int rowId = 0;
+	int attributeId = 1;
+
+	if (citusAvailableVersion != NULL)
+	{
+		return citusAvailableVersion;
+	}
+
+	spiConnectionResult = SPI_connect();
+	if (spiConnectionResult != SPI_OK_CONNECT)
+	{
+		ereport(ERROR, (errmsg("could not connect to SPI manager")));
+	}
+
+	spiQueryResult = SPI_execute(CITUS_AVAILABLE_VERSION_QUERY, readOnly, 0);
+	if (spiQueryResult != SPI_OK_SELECT)
+	{
+		ereport(ERROR, (errmsg("execution was not successful \"%s\"",
+							   CITUS_AVAILABLE_VERSION_QUERY)));
+	}
+
+	/* we expect that query will return single value in a single row */
+	Assert(SPI_processed == 1);
+
+	tuple = SPI_tuptable->vals[rowId];
+	extensionVersionDatum = SPI_getbinval(tuple, SPI_tuptable->tupdesc, attributeId,
+										  &columnNull);
+	citusAvailableVersion = text_to_cstring(DatumGetTextPP(extensionVersionDatum));
+
+	SPI_finish();
+
+	return citusAvailableVersion;
+}
+
+
+/*
+ * CitusCatalogVersion returns the Citus version in PostgreSQL pg_extension table.
+ * It also saves the result, thus consecutive calls to CitusExtensionCatalogVersion
+ * will not read the catalog tables again.
+ */
+static char *
+CitusCatalogVersion(void)
+{
+	Relation relation = NULL;
+	SysScanDesc scandesc;
+	ScanKeyData entry[1];
+	HeapTuple extensionTuple = NULL;
+
+	if (citusCatalogVersion != NULL)
+	{
+		return citusCatalogVersion;
+	}
+
+	relation = heap_open(ExtensionRelationId, AccessShareLock);
+
+	ScanKeyInit(&entry[0],
+				Anum_pg_extension_extname,
+				BTEqualStrategyNumber, F_NAMEEQ,
+				CStringGetDatum("citus"));
+
+	scandesc = systable_beginscan(relation, ExtensionNameIndexId, true,
+								  NULL, 1, entry);
+
+	extensionTuple = systable_getnext(scandesc);
+
+	/* We assume that there can be at most one matching tuple */
+	if (HeapTupleIsValid(extensionTuple))
+	{
+		MemoryContext oldMemoryContext = NULL;
+		int extensionIndex = Anum_pg_extension_extversion;
+		TupleDesc tupleDescriptor = RelationGetDescr(relation);
+		bool isNull = false;
+
+		Datum extensionVersionDatum = heap_getattr(extensionTuple, extensionIndex,
+												   tupleDescriptor, &isNull);
+
+		if (isNull)
+		{
+			ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("citus extension version is null")));
+		}
+
+		/* we will cache the result of citus version to prevent catalog access */
+		if (CacheMemoryContext == NULL)
+		{
+			CreateCacheMemoryContext();
+		}
+		oldMemoryContext = MemoryContextSwitchTo(CacheMemoryContext);
+
+		citusCatalogVersion = text_to_cstring(DatumGetTextPP(extensionVersionDatum));
+
+		MemoryContextSwitchTo(oldMemoryContext);
+	}
+	else
+	{
+		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("citus extension is not loaded")));
+	}
+
+	systable_endscan(scandesc);
+
+	heap_close(relation, AccessShareLock);
+
+	return citusCatalogVersion;
 }
 
 

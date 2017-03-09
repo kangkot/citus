@@ -17,6 +17,9 @@
 #include "distributed/worker_manager.h"
 #include "utils/hsearch.h"
 
+/* query for getting available version */
+#define CITUS_AVAILABLE_VERSION_QUERY \
+	"SELECT default_version FROM pg_available_extensions() WHERE name = 'citus'"
 
 /*
  * Representation of a table's metadata that is frequently used for

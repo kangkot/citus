@@ -1,0 +1,2 @@
+/* so the shared-library knows its own version */
+#undef CITUS_BINARY_VERSION
