@@ -398,13 +398,16 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 	Relids commonRelids = NULL;
 
 	/*
-	 * If there is a single RTE_RELATION that is not a reference table,
-	 * we shouldn't bother about joins.
+	 * If there are no JOINs between non-reference tables, we shouldn't
+	 * bother about them.
 	 */
 	if (totalRelationCount - referenceRelationCount <= 1)
 	{
 		return true;
 	}
+
+	/* reset the equivalence id counter per call */
+	varEquivalenceId = 1;
 
 	innerJoinVarEquivalences =
 		GenerateVarEquivalencesForRelationRestrictions(restrictionContext);

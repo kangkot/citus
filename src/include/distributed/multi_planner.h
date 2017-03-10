@@ -40,12 +40,10 @@ typedef struct RelationRestriction
 	List *prunedShardIntervalList;
 } RelationRestriction;
 
-
 typedef struct JoinRestrictionContext
 {
 	List *joinRestrictionList;
 } JoinRestrictionContext;
-
 
 typedef struct JoinRestriction
 {
@@ -54,7 +52,6 @@ typedef struct JoinRestriction
 	PlannerInfo *plannerInfo;
 } JoinRestriction;
 
-
 typedef struct RelationShard
 {
 	CitusNode type;
@@ -62,19 +59,19 @@ typedef struct RelationShard
 	uint64 shardId;
 } RelationShard;
 
-
 typedef struct VarEquivalenceClass
 {
 	uint32 equivalenceId;
 	List *equivalentVars;
-}VarEquivalenceClass;
+} VarEquivalenceClass;
 
 typedef struct VarEquivalenceClassMember
 {
 	Index varno;
 	AttrNumber varattno;
 	Oid relationId;
-}VarEquivalenceClassMember;
+} VarEquivalenceClassMember;
+
 
 extern PlannedStmt * multi_planner(Query *parse, int cursorOptions,
 								   ParamListInfo boundParams);
@@ -83,12 +80,6 @@ struct MultiPlan;
 extern struct MultiPlan * GetMultiPlan(CustomScan *node);
 extern void multi_relation_restriction_hook(PlannerInfo *root, RelOptInfo *relOptInfo,
 											Index index, RangeTblEntry *rte);
-extern void multi_special_join_restriction_hook(PlannerInfo *root,
-												RelOptInfo *joinrel,
-												RelOptInfo *outerrel,
-												RelOptInfo *innerrel,
-												JoinType jointype,
-												JoinPathExtraData *extra);
 extern void multi_join_restriction_hook(PlannerInfo *root,
 										RelOptInfo *joinrel,
 										RelOptInfo *outerrel,

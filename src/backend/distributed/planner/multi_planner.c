@@ -571,12 +571,6 @@ multi_join_restriction_hook(PlannerInfo *root,
 	JoinRestriction *joinRestriction = palloc0(sizeof(JoinRestriction));
 	List *restrictInfoList = NIL;
 
-	/* we don't want to process anti joins and RTEs that are in the anti-joins */
-	if (jointype == JOIN_ANTI)
-	{
-		return;
-	}
-
 	restrictInfoList = extra->restrictlist;
 	joinContext = CurrentJoinRestrictionContext();
 	Assert(joinContext != NULL);
@@ -647,7 +641,7 @@ multi_relation_restriction_hook(PlannerInfo *root, RelOptInfo *relOptInfo, Index
 
 /*
  * CreateAndPushPlannerContextes creates a new restriction context and a new join context,
- * inserts it to the beginning of the repective context lists.
+ * inserts it to the beginning of the respective context lists.
  */
 static void
 CreateAndPushPlannerContexts(void)
