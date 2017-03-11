@@ -611,14 +611,14 @@ GenerateVarEquivalencesForRelationRestrictions(
 					List *parentParamList = relationRestriction->parentPlannerParamList;
 					Param *equivalenceParam = (Param *) equivalenceExpr;
 
-					expressionVar = GetVarFromAssignedParam(parentParamList, equivalenceParam);
+					expressionVar = GetVarFromAssignedParam(parentParamList,
+															equivalenceParam);
 					if (expressionVar)
 					{
 						AddToVarEquivalenceClass(relationRestriction->parentPlannerInfo,
 												 expressionVar,
 												 &varEquivalance);
 					}
-
 				}
 				else if (IsA(equivalenceExpr, Var))
 				{

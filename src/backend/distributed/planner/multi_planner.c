@@ -624,7 +624,7 @@ multi_relation_restriction_hook(PlannerInfo *root, RelOptInfo *relOptInfo, Index
 	if (relationRestriction->parentPlannerInfo)
 	{
 		relationRestriction->parentPlannerParamList =
-				CopyPlanParamList(root->parent_root->plan_params);
+			CopyPlanParamList(root->parent_root->plan_params);
 	}
 
 	restrictionContext->hasDistributedRelation |= distributedTable;
