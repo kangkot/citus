@@ -69,6 +69,7 @@ static PlannedStmt * FinalizeNonRouterPlan(PlannedStmt *localPlan, MultiPlan *mu
 										   CustomScan *customScan);
 static PlannedStmt * FinalizeRouterPlan(PlannedStmt *localPlan, CustomScan *customScan);
 static void CheckNodeIsDumpable(Node *node);
+static List * CopyPlanParamList(List *originalPlanParamList);
 												  JoinRestrictionContext *
 												  joinRestrictionContext);
 static void CreateAndPushPlannerContexts(void);
@@ -617,7 +618,14 @@ multi_relation_restriction_hook(PlannerInfo *root, RelOptInfo *relOptInfo, Index
 	relationRestriction->relOptInfo = relOptInfo;
 	relationRestriction->distributedRelation = distributedTable;
 	relationRestriction->plannerInfo = root;
+	relationRestriction->parentPlannerInfo = root->parent_root;
 	relationRestriction->prunedShardIntervalList = NIL;
+
+	if (relationRestriction->parentPlannerInfo)
+	{
+		relationRestriction->parentPlannerParamList =
+				CopyPlanParamList(root->parent_root->plan_params);
+	}
 
 	restrictionContext->hasDistributedRelation |= distributedTable;
 	restrictionContext->hasLocalRelation |= localTable;
@@ -636,6 +644,33 @@ multi_relation_restriction_hook(PlannerInfo *root, RelOptInfo *relOptInfo, Index
 
 	restrictionContext->relationRestrictionList =
 		lappend(restrictionContext->relationRestrictionList, relationRestriction);
+}
+
+
+/*
+ * CopyPlanParamList deep copies the input PlannerParamItem list and returns the newly
+ * allocated list.
+ * Note that we cannot use copyObject() function directly since there is no support for
+ * copying PlannerParamItem structs.
+ */
+static List *
+CopyPlanParamList(List *originalPlanParamList)
+{
+	ListCell *planParamCell = NULL;
+	List *copiedPlanParamList = NIL;
+
+	foreach(planParamCell, originalPlanParamList)
+	{
+		PlannerParamItem *originalParamItem = lfirst(planParamCell);
+		PlannerParamItem *copiedParamItem = makeNode(PlannerParamItem);
+
+		copiedParamItem->paramId = originalParamItem->paramId;
+		copiedParamItem->item = copyObject(originalParamItem->item);
+
+		copiedPlanParamList = lappend(copiedPlanParamList, copiedParamItem);
+	}
+
+	return copiedPlanParamList;
 }
 
 

@@ -99,6 +99,8 @@ static uint32 ReferenceRelationCount(RelationRestrictionContext *restrictionCont
 static VarEquivalenceClass * GenerateCommonPartitionKeyEquivalence(List *varEquivalences);
 static List * GenerateVarEquivalencesForRelationRestrictions(
 	RelationRestrictionContext *restrictionContext);
+static Var * GetVarFromAssignedParam(List *parentPlannerParamList,
+									 Param *plannerParam);
 static List * GenerateVarEquivalencesForJoinRestrictions(
 	JoinRestrictionContext *joinRestrictionContext);
 static void ListConcatUniqueEquivalantPartitionKeys(VarEquivalenceClass **eqClass,
@@ -600,16 +602,29 @@ GenerateVarEquivalencesForRelationRestrictions(
 
 			foreach(equivilanceMemberCell, plannerEqClass->ec_members)
 			{
-				EquivalenceMember *em = lfirst(equivilanceMemberCell);
+				EquivalenceMember *equivalenceMember = lfirst(equivilanceMemberCell);
+				Expr *equivalenceExpr = equivalenceMember->em_expr;
 				Var *expressionVar = NULL;
 
-				if (!IsA(em->em_expr, Var))
+				if (IsA(equivalenceExpr, Param))
 				{
-					continue;
-				}
+					List *parentParamList = relationRestriction->parentPlannerParamList;
+					Param *equivalenceParam = (Param *) equivalenceExpr;
 
-				expressionVar = (Var *) em->em_expr;
-				AddToVarEquivalenceClass(plannerInfo, expressionVar, &varEquivalance);
+					expressionVar = GetVarFromAssignedParam(parentParamList, equivalenceParam);
+					if (expressionVar)
+					{
+						AddToVarEquivalenceClass(relationRestriction->parentPlannerInfo,
+												 expressionVar,
+												 &varEquivalance);
+					}
+
+				}
+				else if (IsA(equivalenceExpr, Var))
+				{
+					expressionVar = (Var *) equivalenceExpr;
+					AddToVarEquivalenceClass(plannerInfo, expressionVar, &varEquivalance);
+				}
 			}
 
 			varEquivalences = lappend(varEquivalences, varEquivalance);
@@ -617,6 +632,51 @@ GenerateVarEquivalencesForRelationRestrictions(
 	}
 
 	return varEquivalences;
+}
+
+
+/*
+ * GetVarFromAssignedParam returns the Var that is assigned to the given
+ * plannerParam if its kind is PARAM_EXEC.
+ *
+ * If the paramkind is not equal to PARAM_EXEC the function returns NULL. Similarly,
+ * if there is no var that the given param is assigned to, the function returns NULL.
+ */
+static Var *
+GetVarFromAssignedParam(List *parentPlannerParamList, Param *plannerParam)
+{
+	Var *assignedVar = NULL;
+	ListCell *plannerParameterCell = NULL;
+
+	Assert(plannerParam != NULL);
+
+	/* we're only interested in parameters that Postgres added for execution */
+	if (plannerParam->paramkind != PARAM_EXEC)
+	{
+		return NULL;
+	}
+
+	foreach(plannerParameterCell, parentPlannerParamList)
+	{
+		PlannerParamItem *plannerParamItem = lfirst(plannerParameterCell);
+
+		if (plannerParamItem->paramId != plannerParam->paramid)
+		{
+			continue;
+		}
+
+		/* TODO: Should we consider PlaceHolderVar?? */
+		if (!IsA(plannerParamItem->item, Var))
+		{
+			continue;
+		}
+
+		assignedVar = (Var *) plannerParamItem->item;
+
+		break;
+	}
+
+	return assignedVar;
 }
 
 
@@ -781,8 +841,10 @@ AddToVarEquivalenceClass(PlannerInfo *root, Var *varToBeAdded,
 											   varToBeAdded->varattno);
 		if (subqueryTargetEntry == NULL || subqueryTargetEntry->resjunk)
 		{
-			elog(ERROR, "subquery %s does not have attribute %d",
-				 rte->eref->aliasname, varToBeAdded->varattno);
+			ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("subquery %s does not have attribute %d",
+								   rte->eref->aliasname,
+								   varToBeAdded->varattno)));
 		}
 
 		if (!IsA(subqueryTargetEntry->expr, Var))
