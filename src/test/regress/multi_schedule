@@ -30,6 +30,7 @@ test: multi_create_table_constraints
 test: multi_master_protocol
 test: multi_load_data
 
+test: multi_insert_select_behavioral_analytics
 test: multi_insert_select
 
 # ----------

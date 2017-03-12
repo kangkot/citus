@@ -1443,13 +1443,18 @@ MultiTaskRouterSelectQuerySupported(Query *query)
 								 NULL, NULL);
 		}
 
-		/* see comment on AddUninstantiatedPartitionRestriction() */
 		if (subquery->setOperations != NULL)
 		{
-			return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
-								 "set operations are not allowed in INSERT ... SELECT "
-								 "queries",
-								 NULL, NULL);
+			SetOperationStmt *setOperationStatement =
+				(SetOperationStmt *) subquery->setOperations;
+
+			if (setOperationStatement->op != SETOP_UNION)
+			{
+				return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
+									 "INTERSECT and EXCEPT set operations are not "
+									 "allowed in INSERT ... SELECT queries",
+									 NULL, NULL);
+			}
 		}
 
 		/*
