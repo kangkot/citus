@@ -1620,7 +1620,7 @@ NeedsDistributedPlanning(Query *queryTree)
  * simply number the RTEs starting from 1.
  */
 void
-AssignRTEIdentities(Query * queryTree)
+AssignRTEIdentities(Query *queryTree)
 {
 	List *rangeTableList = NIL;
 	ListCell *rangeTableCell = NULL;
@@ -1632,7 +1632,12 @@ AssignRTEIdentities(Query * queryTree)
 	foreach(rangeTableCell, rangeTableList)
 	{
 		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) lfirst(rangeTableCell);
-		IdentifyRTE(rangeTableEntry, rteIdentifier++);
+
+		if (rangeTableEntry->rtekind == RTE_RELATION || rangeTableEntry->rtekind ==
+			RTE_SUBQUERY)
+		{
+			IdentifyRTE(rangeTableEntry, rteIdentifier++);
+		}
 	}
 }
 
