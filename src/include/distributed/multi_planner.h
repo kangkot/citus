@@ -72,6 +72,7 @@ typedef struct VarEquivalenceClassMember
 	Index varno;
 	AttrNumber varattno;
 	Oid relationId;
+	int rteIdendity;
 } VarEquivalenceClassMember;
 
 
@@ -92,5 +93,7 @@ extern bool IsModifyCommand(Query *query);
 extern bool IsModifyMultiPlan(struct MultiPlan *multiPlan);
 extern RangeTblEntry * RemoteScanRangeTableEntry(List *columnNameList);
 
+
+extern int GetRTEIdentity(RangeTblEntry *rte);
 
 #endif /* MULTI_PLANNER_H */

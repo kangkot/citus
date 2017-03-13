@@ -182,6 +182,7 @@ extern bool SubqueryPushdown;
 /* Function declarations for building logical plans */
 extern MultiTreeRoot * MultiLogicalPlanCreate(Query *queryTree);
 extern bool NeedsDistributedPlanning(Query *queryTree);
+extern void AssignRTEIdentities(Query * queryTree);
 extern MultiNode * ParentNode(MultiNode *multiNode);
 extern MultiNode * ChildNode(MultiUnaryNode *multiNode);
 extern MultiNode * GrandChildNode(MultiUnaryNode *multiNode);

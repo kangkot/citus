@@ -431,7 +431,7 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 	{
 		VarEquivalenceClassMember *classMember = lfirst(commonEqClassCell);
 
-		commonRelids = bms_add_member(commonRelids, classMember->varno);
+		commonRelids = bms_add_member(commonRelids, classMember->rteIdendity);
 	}
 
 	/* check whether all relations exists in the main restriction list */
@@ -440,7 +440,7 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 		RelationRestriction *restriction = lfirst(restrictionCell);
 
 		if (PartitionKey(restriction->relationId) &&
-			!bms_is_member(restriction->index, commonRelids))
+			!bms_is_member(GetRTEIdentity(restriction->rte), commonRelids))
 		{
 			allRelationsJoinedOnPartitionKey = false;
 			break;
@@ -806,6 +806,7 @@ AddToVarEquivalenceClass(PlannerInfo *root, Var *varToBeAdded,
 			sizeof(VarEquivalenceClassMember));
 		varEqMember->varattno = varToBeAdded->varattno;
 		varEqMember->varno = varToBeAdded->varno;
+		varEqMember->rteIdendity = GetRTEIdentity(rte);
 		varEqMember->relationId = rte->relid;
 
 		(*varEquivalanceClass)->equivalentVars =
@@ -853,9 +854,24 @@ AddToVarEquivalenceClass(PlannerInfo *root, Var *varToBeAdded,
 		}
 
 		varToBeAdded = (Var *) subqueryTargetEntry->expr;
+		if (subquery->setOperations)
+		{
+			SetOperationStmt *unionStatement =
+				(SetOperationStmt *) subquery->setOperations;
 
+			RangeTblRef *leftRangeTableReference = (RangeTblRef *) unionStatement->larg;
+			RangeTblRef *rightRangeTableReference = (RangeTblRef *) unionStatement->rarg;
+
+			varToBeAdded->varno = leftRangeTableReference->rtindex;
+			AddToVarEquivalenceClass(baseRelOptInfo->subroot, varToBeAdded,
+									 varEquivalanceClass);
+
+			varToBeAdded->varno = rightRangeTableReference->rtindex;
+			AddToVarEquivalenceClass(baseRelOptInfo->subroot, varToBeAdded,
+									 varEquivalanceClass);
+		}
 		/* Can only handle a simple Var of subquery's query level */
-		if (varToBeAdded && IsA(varToBeAdded, Var) && varToBeAdded->varlevelsup == 0)
+		else if (varToBeAdded && IsA(varToBeAdded, Var) && varToBeAdded->varlevelsup == 0)
 		{
 			AddToVarEquivalenceClass(baseRelOptInfo->subroot, varToBeAdded,
 									 varEquivalanceClass);
@@ -876,7 +892,7 @@ VarClassMemberEqualsToVarClass(VarEquivalenceClassMember *inputMember,
 	foreach(classCell, varEqClass->equivalentVars)
 	{
 		VarEquivalenceClassMember *memberOfClass = lfirst(classCell);
-		if (memberOfClass->varno == inputMember->varno &&
+		if (memberOfClass->rteIdendity == inputMember->rteIdendity &&
 			memberOfClass->varattno == inputMember->varattno)
 		{
 			return true;

@@ -96,6 +96,8 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	if (needsDistributedPlanning)
 	{
 		originalQuery = copyObject(parse);
+
+		AssignRTEIdentities(parse);
 	}
 
 	/* create a restriction context and put it at the end if context list */
@@ -580,6 +582,7 @@ multi_join_restriction_hook(PlannerInfo *root,
 	joinRestriction->joinRestrictInfoList = restrictInfoList;
 	joinRestriction->plannerInfo = root;
 
+
 	joinContext->joinRestrictionList =
 		lappend(joinContext->joinRestrictionList, joinRestriction);
 }
@@ -644,6 +647,17 @@ multi_relation_restriction_hook(PlannerInfo *root, RelOptInfo *relOptInfo, Index
 
 	restrictionContext->relationRestrictionList =
 		lappend(restrictionContext->relationRestrictionList, relationRestriction);
+}
+
+
+/* GetRTEIdentity returns the identity assigned with IdentifyRTE. */
+int
+GetRTEIdentity(RangeTblEntry *rte)
+{
+	Assert(IsA(rte->values_lists, IntList));
+	Assert(list_length(rte->values_lists) == 1);
+
+	return linitial_int(rte->values_lists);
 }
 
 

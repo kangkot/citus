@@ -78,6 +78,8 @@ static MultiSelect * MultiSelectNode(List *whereClauseList);
 static bool IsSelectClause(Node *clause);
 static MultiProject * MultiProjectNode(List *targetEntryList);
 static MultiExtendedOp * MultiExtendedOpNode(Query *queryTree);
+static void IdentifyRTE(RangeTblEntry *rte, int identifier);
+
 
 /* Local functions forward declarations for applying joins */
 static MultiNode * ApplyJoinRule(MultiNode *leftNode, MultiNode *rightNode,
@@ -1608,6 +1610,44 @@ NeedsDistributedPlanning(Query *queryTree)
 	}
 
 	return hasDistributedRelation;
+}
+
+
+/*
+ * To be able to track individual RTEs through postgres' query
+ * planning, we need to be able to figure out whether an RTE is
+ * actually a copy of another, rather than a different one. We
+ * simply number the RTEs starting from 1.
+ */
+void
+AssignRTEIdentities(Query * queryTree)
+{
+	List *rangeTableList = NIL;
+	ListCell *rangeTableCell = NULL;
+	int rteIdentifier = 1;
+
+	/* extract range table entries for simple relations only */
+	ExtractRangeTableEntryWalker((Node *) queryTree, &rangeTableList);
+
+	foreach(rangeTableCell, rangeTableList)
+	{
+		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) lfirst(rangeTableCell);
+		IdentifyRTE(rangeTableEntry, rteIdentifier++);
+	}
+}
+
+
+/* To be able to track RTEs through postgres' query planning, which copies and
+ * duplicate, and modifies them, we sometimes need to figure out whether two
+ * RTEs are copies of the same original RTE. For that we, hackishly, use a
+ * field normally unused in RTE_RELATION RTEs.
+ *
+ * The assigned identifier better be unique within a plantree.
+ */
+static void
+IdentifyRTE(RangeTblEntry *rte, int identifier)
+{
+	rte->values_lists = list_make1_int(identifier);
 }
 
 
