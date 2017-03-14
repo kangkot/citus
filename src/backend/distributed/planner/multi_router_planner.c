@@ -387,8 +387,8 @@ static bool
 AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 								 JoinRestrictionContext *joinRestrictionContext)
 {
-	List *innerJoinVarEquivalences = NIL;
-	List *specialJoinVarEquivalences = NIL;
+	List *relationRestrictionVarEquivalences = NIL;
+	List *joinRestrictionVarEquivalences = NIL;
 	List *varEquivalences = NIL;
 	VarEquivalenceClass *commonEquivalenceClass = NULL;
 	bool allRelationsJoinedOnPartitionKey = true;
@@ -411,12 +411,13 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 	/* reset the equivalence id counter per call */
 	varEquivalenceId = 1;
 
-	innerJoinVarEquivalences =
+	relationRestrictionVarEquivalences =
 		GenerateVarEquivalencesForRelationRestrictions(restrictionContext);
-	specialJoinVarEquivalences =
+	joinRestrictionVarEquivalences =
 		GenerateVarEquivalencesForJoinRestrictions(joinRestrictionContext);
 
-	varEquivalences = list_concat(innerJoinVarEquivalences, specialJoinVarEquivalences);
+	varEquivalences = list_concat(relationRestrictionVarEquivalences,
+								  joinRestrictionVarEquivalences);
 
 	/*
 	 * In general we're trying to expand existing the equivalence classes to find a

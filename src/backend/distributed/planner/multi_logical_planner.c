@@ -1633,16 +1633,18 @@ AssignRTEIdentities(Query *queryTree)
 	{
 		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) lfirst(rangeTableCell);
 
-		if (rangeTableEntry->rtekind == RTE_RELATION || rangeTableEntry->rtekind ==
-			RTE_SUBQUERY)
+		if (rangeTableEntry->rtekind != RTE_RELATION)
 		{
-			IdentifyRTE(rangeTableEntry, rteIdentifier++);
+			continue;
 		}
+
+		IdentifyRTE(rangeTableEntry, rteIdentifier++);
 	}
 }
 
 
-/* To be able to track RTEs through postgres' query planning, which copies and
+/*
+ * To be able to track RTEs through postgres' query planning, which copies and
  * duplicate, and modifies them, we sometimes need to figure out whether two
  * RTEs are copies of the same original RTE. For that we, hackishly, use a
  * field normally unused in RTE_RELATION RTEs.
@@ -1652,6 +1654,9 @@ AssignRTEIdentities(Query *queryTree)
 static void
 IdentifyRTE(RangeTblEntry *rte, int identifier)
 {
+	Assert(rte->rtekind == RTE_RELATION);
+	Assert(rte->values_lists == NIL);
+
 	rte->values_lists = list_make1_int(identifier);
 }
 

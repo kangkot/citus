@@ -654,6 +654,7 @@ multi_relation_restriction_hook(PlannerInfo *root, RelOptInfo *relOptInfo, Index
 int
 GetRTEIdentity(RangeTblEntry *rte)
 {
+	Assert(rte->rtekind == RTE_RELATION);
 	Assert(IsA(rte->values_lists, IntList));
 	Assert(list_length(rte->values_lists) == 1);
 
@@ -778,12 +779,6 @@ HasUnresolvedExternParamsWalker(Node *expression, ParamListInfo boundParams)
 
 		/* only care about user supplied parameters */
 		if (param->paramkind != PARAM_EXTERN)
-		{
-			return false;
-		}
-
-		/* don't care about our special parameter, it'll be removed during planning */
-		if (paramId == UNINSTANTIATED_PARAMETER_ID)
 		{
 			return false;
 		}
