@@ -541,22 +541,21 @@ static List *
 HashedShardIntervalOpExpressions(ShardInterval *shardInterval)
 {
 	List *operatorExpressions = NIL;
-
 	Var *hashedGEColumn = NULL;
-	OpExpr *hashedGEOpExpr = NULL;
-	Datum shardMinValue = shardInterval->minValue;
-
 	Var *hashedLEColumn = NULL;
+	OpExpr *hashedGEOpExpr = NULL;
 	OpExpr *hashedLEOpExpr = NULL;
-	Datum shardMaxValue = shardInterval->maxValue;
-
 	Oid integer4GEoperatorId = InvalidOid;
 	Oid integer4LEoperatorId = InvalidOid;
 
-	if (PartitionMethod(shardInterval->relationId) != DISTRIBUTE_BY_HASH)
+	Datum shardMinValue = shardInterval->minValue;
+	Datum shardMaxValue = shardInterval->maxValue;
+	char partitionMethod = PartitionMethod(shardInterval->relationId);
+
+	if (partitionMethod != DISTRIBUTE_BY_HASH)
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						errmsg("cannot created shard interval operator expression for "
+						errmsg("cannot create shard interval operator expression for "
 							   "distributed relations other than hash distributed "
 							   "relations")));
 	}
@@ -602,9 +601,12 @@ HashedShardIntervalOpExpressions(ShardInterval *shardInterval)
 
 
 /*
- * Returns a Param that can be used as an uninstantiated parameter for the given
- * column in the sense that paramtype, paramtypmod and collid is set to the input
- * Var's corresponding values.
+ * UninstantiatedParameterForColumn returns a Param that can be used as an uninstantiated
+ * parameter for the given column in the sense that paramtype, paramtypmod and collid
+ * is set to the input Var's corresponding values.
+ *
+ * Note that we're using hard coded UNINSTANTIATED_PARAMETER_ID which is the required parameter
+ * for our purposes. See multi_planner.c@multi_planner for the details.
  */
 static Param *
 UninstantiatedParameterForColumn(Var *relationPartitionKey)
@@ -662,11 +664,9 @@ AddShardIntervalRestrictionToSelect(Query *subqery, ShardInterval *shardInterval
 	/* we should have found target partition column */
 	Assert(targetPartitionColumnVar != NULL);
 
-	integer4GEoperatorId = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT4OID,
-											   INT4OID,
+	integer4GEoperatorId = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT4OID, INT4OID,
 											   BTGreaterEqualStrategyNumber);
-	integer4LEoperatorId = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT4OID,
-											   INT4OID,
+	integer4LEoperatorId = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT4OID, INT4OID,
 											   BTLessEqualStrategyNumber);
 
 	/* ensure that we find the correct operators */
@@ -1268,7 +1268,7 @@ AddUninstantiatedPartitionRestriction(Query *originalQuery)
 static void
 AddUninstantiatedEqualityQual(Query *query, Var *partitionColumn)
 {
-	Param *equalityParameter = makeNode(Param);
+	Param *equalityParameter = UninstantiatedParameterForColumn(partitionColumn);
 	OpExpr *uninstantiatedEqualityQual = NULL;
 	Oid partitionColumnCollid = InvalidOid;
 	Oid lessThanOperator = InvalidOid;
@@ -1285,13 +1285,6 @@ AddUninstantiatedEqualityQual(Query *query, Var *partitionColumn)
 
 
 	partitionColumnCollid = partitionColumn->varcollid;
-
-	equalityParameter->paramkind = PARAM_EXTERN;
-	equalityParameter->paramid = UNINSTANTIATED_PARAMETER_ID;
-	equalityParameter->paramtype = partitionColumn->vartype;
-	equalityParameter->paramtypmod = partitionColumn->vartypmod;
-	equalityParameter->paramcollid = partitionColumnCollid;
-	equalityParameter->location = -1;
 
 	/* create an equality on the on the target partition column */
 	uninstantiatedEqualityQual = (OpExpr *) make_opclause(equalsOperator, InvalidOid,
