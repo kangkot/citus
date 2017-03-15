@@ -61,7 +61,8 @@ static CustomScanMethods DelayedErrorCustomScanMethods = {
 /* local function forward declarations */
 static PlannedStmt * CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery,
 										   Query *query, ParamListInfo boundParams,
-										   RelationRestrictionContext *restrictionContext);
+										   RelationRestrictionContext *restrictionContext,
+										   JoinRestrictionContext *joinRestrictionContext);
 static Node * SerializeMultiPlan(struct MultiPlan *multiPlan);
 static MultiPlan * DeserializeMultiPlan(Node *node);
 static PlannedStmt * FinalizePlan(PlannedStmt *localPlan, MultiPlan *multiPlan);
@@ -70,8 +71,6 @@ static PlannedStmt * FinalizeNonRouterPlan(PlannedStmt *localPlan, MultiPlan *mu
 static PlannedStmt * FinalizeRouterPlan(PlannedStmt *localPlan, CustomScan *customScan);
 static void CheckNodeIsDumpable(Node *node);
 static List * CopyPlanParamList(List *originalPlanParamList);
-												  JoinRestrictionContext *
-												  joinRestrictionContext);
 static void CreateAndPushPlannerContexts(void);
 static RelationRestrictionContext * CurrentRestrictionContext(void);
 static JoinRestrictionContext * CurrentJoinRestrictionContext(void);

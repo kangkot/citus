@@ -1152,12 +1152,6 @@ HashedShardIntervalOpExpressions(ShardInterval *shardInterval)
 
 
 /*
- * UninstantiatedParameterForColumn returns a Param that can be used as an uninstantiated
- * parameter for the given column in the sense that paramtype, paramtypmod and collid
- * is set to the input Var's corresponding values.
- *
- * Note that we're using hard coded UNINSTANTIATED_PARAMETER_ID which is the required parameter
- * for our purposes. See multi_planner.c@multi_planner for the details.
  * AddShardIntervalRestrictionToSelect adds the following range boundaries
  * with the given subquery and shardInterval:
  *
@@ -1732,7 +1726,6 @@ InsertPartitionColumnMatchesSelect(Query *query, RangeTblEntry *insertRte,
 
 
 /*
-	Param *equalityParameter = UninstantiatedParameterForColumn(partitionColumn);
  * ModifyQuerySupported returns NULL if the query only contains supported
  * features, otherwise it returns an error description.
  */
