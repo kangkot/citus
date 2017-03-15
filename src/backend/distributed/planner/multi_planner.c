@@ -295,6 +295,16 @@ CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query
 	resultPlan = FinalizePlan(localPlan, distributedPlan);
 
 	/*
+	 * PostgreSQL checks access permissions in standard_ExecutorStart(), but
+	 * we do these checks here just before returning from planner. After this
+	 * point, we don't have access to local definitions of distributed relations
+	 * in our plan because we convert them to custom scan nodes. Therefore, we
+	 * check access permissions for distributed relations here just before we
+	 * move into execution part.
+	 */
+	ExecCheckRTPerms(localPlan->rtable, true);
+
+	/*
 	 * As explained above, force planning costs to be unrealistically high if
 	 * query planning failed (possibly) due to prepared statement parameters.
 	 */
