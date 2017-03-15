@@ -180,21 +180,24 @@ SELECT count(*) FROM
    (SELECT 1::bigint)
 ) b;
 
+---
+-- TEMPORARLY DISABLE UNIONS WITHOUT JOINS
+---
 -- Check that we error out if queries in union do not include partition columns.
 
-SELECT count(*) FROM
-(
-   (SELECT l_orderkey FROM lineitem_subquery) UNION
-   (SELECT l_partkey FROM lineitem_subquery)
-) b;
+--SELECT count(*) FROM
+--(
+  -- (SELECT l_orderkey FROM lineitem_subquery) UNION
+  -- (SELECT l_partkey FROM lineitem_subquery)
+--) b;
 
 -- Check that we run union queries if partition column is selected.
 
-SELECT count(*) FROM
-(
-   (SELECT l_orderkey FROM lineitem_subquery) UNION
-   (SELECT l_orderkey FROM lineitem_subquery)
-) b;
+--SELECT count(*) FROM
+--(
+  -- (SELECT l_orderkey FROM lineitem_subquery) UNION
+  -- (SELECT l_orderkey FROM lineitem_subquery)
+--) b;
 
 -- Check that we error out if the outermost query has subquery join.
 
@@ -272,23 +275,23 @@ WHERE
 
 -- Check that if subquery is pulled, we don't error and run query properly.
 
-SELECT count(*) FROM
-(
-	SELECT l_orderkey FROM (
-		(SELECT l_orderkey FROM lineitem_subquery) UNION
-		(SELECT l_orderkey FROM lineitem_subquery)
-	) a
-	WHERE l_orderkey = 1
-) b;
+--SELECT count(*) FROM
+--(
+	--SELECT l_orderkey FROM (
+		--(SELECT l_orderkey FROM lineitem_subquery) UNION
+		--(SELECT l_orderkey FROM lineitem_subquery)
+	--) a
+	--WHERE l_orderkey = 1
+--) b;
 
-SELECT count(*) FROM
-(
-	SELECT * FROM (
-		(SELECT * FROM lineitem_subquery) UNION
-		(SELECT * FROM lineitem_subquery)
-	) a
-	WHERE l_orderkey = 1
-) b;
+--SELECT count(*) FROM
+--(
+	--SELECT * FROM (
+		--(SELECT * FROM lineitem_subquery) UNION
+		--(SELECT * FROM lineitem_subquery)
+	--) a
+	--WHERE l_orderkey = 1
+--) b;
 
 SELECT max(l_orderkey) FROM
 (
