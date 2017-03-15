@@ -113,7 +113,7 @@ static Task * RouterModifyTaskForShardInterval(Query *originalQuery,
 											   restrictionContext,
 											   uint32 taskIdIndex,
 											   bool allRelationsJoinedOnPartitionKey);
-static List * HashedShardIntervalOpExpressions(ShardInterval *shardInterval);
+static List * ShardIntervalOpExpressions(ShardInterval *shardInterval, Index rteIndex);
 static bool MasterIrreducibleExpression(Node *expression, bool *varArgument,
 										bool *badCoalesce);
 static bool MasterIrreducibleExpressionWalker(Node *expression, WalkerState *state);
@@ -604,13 +604,16 @@ GenerateVarEquivalencesForRelationRestrictions(
 			foreach(equivilanceMemberCell, plannerEqClass->ec_members)
 			{
 				EquivalenceMember *equivalenceMember = lfirst(equivilanceMemberCell);
-				Expr *equivalenceExpr = equivalenceMember->em_expr;
+				Node *equivalenceNode = strip_implicit_coercions(
+					(Node *) equivalenceMember->em_expr);
+				Expr *strippedEquivalenceExpr = (Expr *) equivalenceNode;
+
 				Var *expressionVar = NULL;
 
-				if (IsA(equivalenceExpr, Param))
+				if (IsA(strippedEquivalenceExpr, Param))
 				{
 					List *parentParamList = relationRestriction->parentPlannerParamList;
-					Param *equivalenceParam = (Param *) equivalenceExpr;
+					Param *equivalenceParam = (Param *) strippedEquivalenceExpr;
 
 					expressionVar = GetVarFromAssignedParam(parentParamList,
 															equivalenceParam);
@@ -621,9 +624,9 @@ GenerateVarEquivalencesForRelationRestrictions(
 												 &varEquivalance);
 					}
 				}
-				else if (IsA(equivalenceExpr, Var))
+				else if (IsA(strippedEquivalenceExpr, Var))
 				{
-					expressionVar = (Var *) equivalenceExpr;
+					expressionVar = (Var *) strippedEquivalenceExpr;
 					AddToVarEquivalenceClass(plannerInfo, expressionVar, &varEquivalance);
 				}
 			}
@@ -704,8 +707,10 @@ GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext *joinRestricti
 		{
 			RestrictInfo *rinfo = (RestrictInfo *) lfirst(restrictionInfoList);
 			OpExpr *restrictionOpExpr = NULL;
-			Expr *leftExpr = NULL;
-			Expr *rightExpr = NULL;
+			Node *leftNode = NULL;
+			Node *rightNode = NULL;
+			Expr *strippedLeftExpr = NULL;
+			Expr *strippedRightExpr = NULL;
 			Var *leftVar = NULL;
 			Var *rightVar = NULL;
 			Expr *restrictionClause = rinfo->clause;
@@ -725,15 +730,20 @@ GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext *joinRestricti
 				continue;
 			}
 
-			leftExpr = linitial(restrictionOpExpr->args);
-			rightExpr = lsecond(restrictionOpExpr->args);
-			if (!(IsA(leftExpr, Var) && IsA(rightExpr, Var)))
+			leftNode = linitial(restrictionOpExpr->args);
+			rightNode = lsecond(restrictionOpExpr->args);
+
+			/* we also don't want implicit coercions */
+			strippedLeftExpr = (Expr *) strip_implicit_coercions((Node *) leftNode);
+			strippedRightExpr = (Expr *) strip_implicit_coercions((Node *) rightNode);
+
+			if (!(IsA(strippedLeftExpr, Var) && IsA(strippedRightExpr, Var)))
 			{
 				continue;
 			}
 
-			leftVar = (Var *) leftExpr;
-			rightVar = (Var *) rightExpr;
+			leftVar = (Var *) strippedLeftExpr;
+			rightVar = (Var *) strippedRightExpr;
 
 			/* we could (probably) safely do that since we disallowed ANTI JOINs ? */
 			AddToVarEquivalenceClass(joinRestriction->plannerInfo, leftVar,
@@ -947,10 +957,7 @@ RouterModifyTaskForShardInterval(Query *originalQuery, ShardInterval *shardInter
 	bool replacePrunedQueryWithDummy = false;
 	bool allReferenceTables = restrictionContext->allReferenceTables;
 	List *hashedOpExpressions = NIL;
-	RestrictInfo *geRestrictInfo = NULL;
-	RestrictInfo *leRestrictInfo = NULL;
-	OpExpr *hashedGEOpExpr = NULL;
-	OpExpr *hashedLEOpExpr = NULL;
+	RestrictInfo *hashedRestrictInfo = NULL;
 
 	/* grab shared metadata lock to stop concurrent placement additions */
 	LockShardDistributionMetadata(shardId, ShareLock);
@@ -963,23 +970,17 @@ RouterModifyTaskForShardInterval(Query *originalQuery, ShardInterval *shardInter
 	{
 		RelationRestriction *restriction = lfirst(restrictionCell);
 		List *originalBaserestrictInfo = restriction->relOptInfo->baserestrictinfo;
+		Index rteIndex = restriction->index;
 
 		if (!allRelationsJoinedOnPartitionKey || allReferenceTables)
 		{
 			continue;
 		}
 
-		hashedOpExpressions = HashedShardIntervalOpExpressions(shardInterval);
-		Assert(list_length(hashedOpExpressions) == 2);
+		hashedOpExpressions = ShardIntervalOpExpressions(shardInterval, rteIndex);
 
-		hashedGEOpExpr = (OpExpr *) linitial(hashedOpExpressions);
-		hashedLEOpExpr = (OpExpr *) lsecond(hashedOpExpressions);
-
-		geRestrictInfo = make_simple_restrictinfo((Expr *) hashedGEOpExpr);
-		originalBaserestrictInfo = lappend(originalBaserestrictInfo, geRestrictInfo);
-
-		leRestrictInfo = make_simple_restrictinfo((Expr *) hashedLEOpExpr);
-		originalBaserestrictInfo = lappend(originalBaserestrictInfo, leRestrictInfo);
+		hashedRestrictInfo = make_simple_restrictinfo((Expr *) hashedOpExpressions);
+		originalBaserestrictInfo = lappend(originalBaserestrictInfo, hashedRestrictInfo);
 
 		restriction->relOptInfo->baserestrictinfo = originalBaserestrictInfo;
 	}
@@ -1089,65 +1090,43 @@ RouterModifyTaskForShardInterval(Query *originalQuery, ShardInterval *shardInter
  * distributed table.
  */
 static List *
-HashedShardIntervalOpExpressions(ShardInterval *shardInterval)
+ShardIntervalOpExpressions(ShardInterval *shardInterval, Index rteIndex)
 {
-	List *operatorExpressions = NIL;
-	Var *hashedGEColumn = NULL;
-	Var *hashedLEColumn = NULL;
-	OpExpr *hashedGEOpExpr = NULL;
-	OpExpr *hashedLEOpExpr = NULL;
-	Oid integer4GEoperatorId = InvalidOid;
-	Oid integer4LEoperatorId = InvalidOid;
-
-	Datum shardMinValue = shardInterval->minValue;
-	Datum shardMaxValue = shardInterval->maxValue;
+	Oid relationId = shardInterval->relationId;
 	char partitionMethod = PartitionMethod(shardInterval->relationId);
+	Var *partitionColumn = NULL;
+	Node *baseConstraint = NULL;
 
-	if (partitionMethod != DISTRIBUTE_BY_HASH)
+	if (partitionMethod == DISTRIBUTE_BY_HASH)
+	{
+		partitionColumn = MakeInt4Column();
+	}
+	else if (partitionMethod == DISTRIBUTE_BY_RANGE || partitionMethod ==
+			 DISTRIBUTE_BY_APPEND)
+	{
+		Assert(rteIndex > 0);
+
+		partitionColumn = PartitionColumn(relationId, rteIndex);
+	}
+	else
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						errmsg("cannot create shard interval operator expression for "
-							   "distributed relations other than hash distributed "
+							   "distributed relations other than hash, range and append distributed "
 							   "relations")));
 	}
 
-	/* get the integer >=, <= operators from the catalog */
-	integer4GEoperatorId = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT4OID,
-											   INT4OID,
-											   BTGreaterEqualStrategyNumber);
-	integer4LEoperatorId = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT4OID,
-											   INT4OID,
-											   BTLessEqualStrategyNumber);
+	/* build the base expression for constraint */
+	baseConstraint = BuildBaseConstraint(partitionColumn);
 
-	/* generate hashed columns */
-	hashedGEColumn = MakeInt4Column();
-	hashedLEColumn = MakeInt4Column();
+	/* walk over shard list and check if shards can be pruned */
 
-	/* generate the necessary operators */
-	hashedGEOpExpr = (OpExpr *) make_opclause(integer4GEoperatorId,
-											  InvalidOid, false,
-											  (Expr *) hashedGEColumn,
-											  (Expr *) MakeInt4Constant(
-												  shardMinValue),
-											  InvalidOid, InvalidOid);
+	if (shardInterval->minValueExists && shardInterval->maxValueExists)
+	{
+		UpdateConstraint(baseConstraint, shardInterval);
+	}
 
-	hashedLEOpExpr = (OpExpr *) make_opclause(integer4LEoperatorId,
-											  InvalidOid, false,
-											  (Expr *) hashedLEColumn,
-											  (Expr *) MakeInt4Constant(
-												  shardMaxValue),
-											  InvalidOid, InvalidOid);
-
-	/* update the operators with correct operator numbers and function ids */
-	hashedGEOpExpr->opfuncid = get_opcode(hashedGEOpExpr->opno);
-	hashedGEOpExpr->opresulttype = get_func_rettype(hashedGEOpExpr->opfuncid);
-	operatorExpressions = lappend(operatorExpressions, hashedGEOpExpr);
-
-	hashedLEOpExpr->opfuncid = get_opcode(hashedLEOpExpr->opno);
-	hashedLEOpExpr->opresulttype = get_func_rettype(hashedLEOpExpr->opfuncid);
-	operatorExpressions = lappend(operatorExpressions, hashedLEOpExpr);
-
-	return operatorExpressions;
+	return list_make1(baseConstraint);
 }
 
 

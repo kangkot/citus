@@ -22,6 +22,9 @@ SELECT create_distributed_table('agg_events', 'user_id');;
 CREATE TABLE reference_table (user_id int);
 SELECT create_reference_table('reference_table');
 
+CREATE TABLE insert_select_varchar_test (key varchar, value int);
+SELECT create_distributed_table('insert_select_varchar_test', 'key', 'hash');
+
 -- set back to the defaults
 SET citus.shard_count = DEFAULT;
 SET citus.shard_replication_factor = DEFAULT;
@@ -1384,8 +1387,30 @@ SET client_min_messages TO DEBUG2;
 -- this should also work
 INSERT INTO raw_events_first SELECT * FROM raw_events_second WHERE user_id = 5;
 
-
 SET client_min_messages TO INFO;
+
+-- now do some tests with varchars
+INSERT INTO insert_select_varchar_test VALUES ('test_1', 10);
+INSERT INTO insert_select_varchar_test VALUES ('test_2', 30);
+
+INSERT INTO insert_select_varchar_test (key, value)
+SELECT *, 100
+FROM   (SELECT f1.key
+        FROM   (SELECT key
+                FROM   insert_select_varchar_test 
+                GROUP  BY 1
+                HAVING Count(key) < 3) AS f1, 
+               (SELECT key 
+                FROM   insert_select_varchar_test 
+                GROUP  BY 1 
+                HAVING Sum(COALESCE(insert_select_varchar_test.value, 0)) > 
+                       20.0) 
+               AS f2 
+        WHERE  f1.key = f2.key 
+        GROUP  BY 1) AS foo; 
+
+SELECT * FROM insert_select_varchar_test;
+
 -- some tests with DEFAULT columns and constant values
 -- this test is mostly importantly intended for deparsing the query correctly
 -- but still it is preferable to have this test here instead of multi_deparse_shard_query
