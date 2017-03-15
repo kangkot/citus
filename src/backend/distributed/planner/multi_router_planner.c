@@ -115,7 +115,6 @@ static Task * RouterModifyTaskForShardInterval(Query *originalQuery,
 											   restrictionContext,
 											   uint32 taskIdIndex,
 											   bool allRelationsJoinedOnPartitionKey);
-static List * ShardIntervalOpExpressions(ShardInterval *shardInterval, Index rteIndex);
 static bool MasterIrreducibleExpression(Node *expression, bool *varArgument,
 										bool *badCoalesce);
 static bool MasterIrreducibleExpressionWalker(Node *expression, WalkerState *state);
@@ -1086,9 +1085,9 @@ RouterModifyTaskForShardInterval(Query *originalQuery, ShardInterval *shardInter
 			continue;
 		}
 
-		hashedOpExpressions = ShardIntervalOpExpressions(shardInterval, rteIndex);
+		shardOpExpressions = ShardIntervalOpExpressions(shardInterval, rteIndex);
 
-		hashedRestrictInfo = make_simple_restrictinfo((Expr *) hashedOpExpressions);
+		hashedRestrictInfo = make_simple_restrictinfo((Expr *) shardOpExpressions);
 		originalBaserestrictInfo = lappend(originalBaserestrictInfo, hashedRestrictInfo);
 
 		restriction->relOptInfo->baserestrictinfo = originalBaserestrictInfo;
@@ -1205,13 +1204,7 @@ List *
 ShardIntervalOpExpressions(ShardInterval *shardInterval, Index rteIndex)
 {
 	Oid relationId = shardInterval->relationId;
-	Node *baseConstraint = NULL;
-	}
-	else if (partitionMethod == DISTRIBUTE_BY_RANGE || partitionMethod ==
-			 DISTRIBUTE_BY_APPEND)
-	{
-		Assert(rteIndex > 0);
-	else
+	char partitionMethod = PartitionMethod(shardInterval->relationId);
 	Var *partitionColumn = NULL;
 	Node *baseConstraint = NULL;
 

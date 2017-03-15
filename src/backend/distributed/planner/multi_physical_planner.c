@@ -2072,7 +2072,9 @@ SubquerySqlTaskList(Job *job, RelationRestrictionContext *restrictionContext,
 	return sqlTaskList;
 }
 
+
 #include "nodes/print.h"
+
 /*
  * Add comment
  */
@@ -2120,7 +2122,8 @@ SubqueryTaskCreate(Query *originalQuery, ShardInterval *shardInterval,
 		shardOpExpressions = ShardIntervalOpExpressions(shardInterval, rteIndex);
 
 		shardRestrictionList = make_simple_restrictinfo((Expr *) shardOpExpressions);
-		originalBaserestrictInfo = lappend(originalBaserestrictInfo, shardRestrictionList);
+		originalBaserestrictInfo = lappend(originalBaserestrictInfo,
+										   shardRestrictionList);
 
 		restriction->relOptInfo->baserestrictinfo = originalBaserestrictInfo;
 	}
