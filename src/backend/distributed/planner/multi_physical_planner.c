@@ -1994,11 +1994,16 @@ BuildJobTreeTaskList(Job *jobTree, RelationRestrictionContext *restrictionContex
 /*
  * TODO: update comment
  * SubquerySqlTaskList creates a list of SQL tasks to execute the given subquery
- * pushdown job. For this, it gets all range tables in the subquery tree, then
- * walks over each range table in the list, gets shards for each range table,
- * and prunes unneeded shards. Then for remaining shards, fragments are created
- * and merged to create fragment combinations. For each created combination, the
- * function builds a SQL task, and appends this task to a task list.
+ * pushdown job. For this, it first checks whether the query is safe to push-down.
+ * In other words, the function first checks whether all the relations that appear
+ * in the query are JOINed on their partition column. Note that the behaviour is
+ * slightly different for reference tables and queries that involve UNIONs. For the
+ * details please see AllRelationsJoinedOnPartitionKey().
+ *
+ * After the above decision is taken, the query is being checked whether the query
+ * is router plannable per target shard interval. For those router plannable worker
+ * queries, we create a SQL task and append the task to the task list that is going
+ * to be executed.
  */
 static List *
 SubquerySqlTaskList(Job *job, RelationRestrictionContext *restrictionContext,
@@ -2014,6 +2019,7 @@ SubquerySqlTaskList(Job *job, RelationRestrictionContext *restrictionContext,
 	uint32 taskIdIndex = 1; /* 0 is reserved for invalid taskId */
 	Oid relationId = 0;
 	int shardCount = 0;
+	int shardOffset = 0;
 	DistTableCacheEntry *targetCacheEntry = NULL;
 	bool allRelationsJoinedOnPartitionKey =
 		AllRelationsJoinedOnPartitionKey(restrictionContext, joinRestrictionContext);
@@ -2022,10 +2028,8 @@ SubquerySqlTaskList(Job *job, RelationRestrictionContext *restrictionContext,
 	ExtractRangeTableRelationWalker((Node *) subquery, &rangeTableList);
 
 	/*
-	 * For each range table entry, first we prune shards for the relation
-	 * referenced in the range table. Then we sort remaining shards and create
-	 * fragments in this order and add these fragments to fragment combination
-	 * list.
+	 * Find the first relation that is not a reference table. We'll use the shards
+	 * of that relation as the target shards.
 	 */
 	foreach(rangeTableCell, rangeTableList)
 	{
@@ -2048,7 +2052,7 @@ SubquerySqlTaskList(Job *job, RelationRestrictionContext *restrictionContext,
 		}
 	}
 
-	for (int shardOffset = 0; shardOffset < shardCount; shardOffset++)
+	for (shardOffset = 0; shardOffset < shardCount; shardOffset++)
 	{
 		ShardInterval *targetShardInterval =
 			targetCacheEntry->sortedShardIntervalArray[shardOffset];
@@ -2073,10 +2077,13 @@ SubquerySqlTaskList(Job *job, RelationRestrictionContext *restrictionContext,
 }
 
 
-#include "nodes/print.h"
-
 /*
- * Add comment
+ * SubqueryTaskCreate creates a modify task by replacing the target
+ * shardInterval's boundary value when allRelationsJoinedOnPartitionKey
+ * is true. Then performs the normal shard pruning on the subquery.
+ *
+ * The function errors out if the subquery is not router select query (i.e.,
+ * subqueries with non equi-joins.).
  */
 static Task *
 SubqueryTaskCreate(Query *originalQuery, ShardInterval *shardInterval,
@@ -2172,7 +2179,7 @@ SubqueryTaskCreate(Query *originalQuery, ShardInterval *shardInterval,
 	/* and generate the full query string */
 	deparse_shard_query(copiedQuery, distributedTableId, shardInterval->shardId,
 						queryString);
-	ereport(DEBUG4, (errmsg("NEW distributed statement: %s", queryString->data)));
+	ereport(DEBUG4, (errmsg("distributed statement: %s", queryString->data)));
 
 	subqueryTask = CreateBasicTask(jobId, taskIdIndex, SQL_TASK, queryString->data);
 	subqueryTask->dependedTaskList = NULL;
