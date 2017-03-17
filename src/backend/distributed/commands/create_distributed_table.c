@@ -156,6 +156,7 @@ create_distributed_table(PG_FUNCTION_ARGS)
 	char *colocateWithTableName = NULL;
 
 	EnsureCoordinator();
+	EnsureAllNodesActivated();
 
 	/* guard against a binary update without a function update */
 	if (PG_NARGS() >= 4)
@@ -226,6 +227,8 @@ Datum
 create_reference_table(PG_FUNCTION_ARGS)
 {
 	Oid relationId = PG_GETARG_OID(0);
+
+	EnsureAllNodesActivated();
 
 	CreateReferenceTable(relationId);
 

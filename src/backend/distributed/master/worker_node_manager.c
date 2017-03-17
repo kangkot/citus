@@ -325,9 +325,12 @@ WorkerNodeList(void)
 
 	while ((workerNode = hash_seq_search(&status)) != NULL)
 	{
-		WorkerNode *workerNodeCopy = palloc0(sizeof(WorkerNode));
-		memcpy(workerNodeCopy, workerNode, sizeof(WorkerNode));
-		workerNodeList = lappend(workerNodeList, workerNodeCopy);
+		if (workerNode->workerState == NODE_STATE_ACTIVE)
+		{
+			WorkerNode *workerNodeCopy = palloc0(sizeof(WorkerNode));
+			memcpy(workerNodeCopy, workerNode, sizeof(WorkerNode));
+			workerNodeList = lappend(workerNodeList, workerNodeCopy);
+		}
 	}
 
 	return workerNodeList;

@@ -35,6 +35,7 @@
 #include "distributed/metadata_sync.h"
 #include "distributed/multi_join_order.h"
 #include "distributed/pg_dist_node.h"
+#include "distributed/reference_table_utils.h"
 #include "distributed/worker_manager.h"
 #include "distributed/worker_transaction.h"
 #include "foreign/foreign.h"
@@ -86,6 +87,7 @@ start_metadata_sync_to_node(PG_FUNCTION_ARGS)
 
 	EnsureCoordinator();
 	EnsureSuperUser();
+	EnsureAllNodesActivated();
 
 	PreventTransactionChain(true, "start_metadata_sync_to_node");
 

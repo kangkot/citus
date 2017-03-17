@@ -33,6 +33,7 @@
 #include "distributed/multi_router_planner.h"
 #include "distributed/pg_dist_node.h"
 #include "distributed/reference_table_utils.h"
+#include "distributed/resource_lock.h"
 #include "distributed/shardinterval_utils.h"
 #include "distributed/worker_manager.h"
 #include "distributed/worker_transaction.h"
@@ -51,30 +52,35 @@ int GroupSize = 1;
 
 
 /* local function forward declarations */
-static void RemoveNodeFromCluster(char *nodeName, int32 nodePort, bool forceRemove);
+static void ActivateNode(char *nodeName, int nodePort);
+static void RemoveNodeFromCluster(char *nodeName, int32 nodePort);
 static Datum AddNodeMetadata(char *nodeName, int32 nodePort, int32 groupId,
-							 char *nodeRack, bool hasMetadata, bool *nodeAlreadyExists);
+							 char *nodeRack, bool hasMetadata, uint32 nodeState,
+							 bool *nodeAlreadyExists);
+static void SetNodeState(char *nodeName, int32 nodePort, uint32 nodeState);
 static Datum GenerateNodeTuple(WorkerNode *workerNode);
 static int32 GetNextGroupId(void);
 static uint32 GetMaxGroupId(void);
 static int GetNextNodeId(void);
 static void InsertNodeRow(int nodeid, char *nodename, int32 nodeport, uint32 groupId,
-						  char *nodeRack, bool hasMetadata);
+						  char *nodeRack, bool hasMetadata, uint32 nodeState);
 static void DeleteNodeRow(char *nodename, int32 nodeport);
 static List * ParseWorkerNodeFileAndRename(void);
 static WorkerNode * TupleToWorkerNode(TupleDesc tupleDescriptor, HeapTuple heapTuple);
 
 /* declarations for dynamic loading */
 PG_FUNCTION_INFO_V1(master_add_node);
+PG_FUNCTION_INFO_V1(master_prepare_node);
 PG_FUNCTION_INFO_V1(master_remove_node);
 PG_FUNCTION_INFO_V1(master_disable_node);
+PG_FUNCTION_INFO_V1(master_activate_node);
 PG_FUNCTION_INFO_V1(master_initialize_node_metadata);
 PG_FUNCTION_INFO_V1(get_shard_id_for_distribution_column);
 
 
 /*
- * master_add_node function adds a new node to the cluster and returns its data. It also
- * replicates all reference tables to the new node.
+ * master_add_node function adds a new node to the cluster as active node and
+ * returns its data. It also replicates all reference tables to the new node.
  */
 Datum
 master_add_node(PG_FUNCTION_ARGS)
@@ -88,7 +94,8 @@ master_add_node(PG_FUNCTION_ARGS)
 	bool nodeAlreadyExists = false;
 
 	Datum returnData = AddNodeMetadata(nodeNameString, nodePort, groupId, nodeRack,
-									   hasMetadata, &nodeAlreadyExists);
+									   hasMetadata, NODE_STATE_ACTIVE,
+									   &nodeAlreadyExists);
 
 	/*
 	 * After adding new node, if the node is not already exist, we  replicate all existing
@@ -98,10 +105,37 @@ master_add_node(PG_FUNCTION_ARGS)
 	 */
 	if (!nodeAlreadyExists)
 	{
-		ReplicateAllReferenceTablesToAllNodes();
+		ActivateNode(nodeNameString, nodePort);
 	}
 
 	PG_RETURN_CSTRING(returnData);
+}
+
+
+/*
+ * master_prepare_node function adds a new node to the cluster as inactive node
+ * and returns its data. It does not replicate reference tables to the new node,
+ * it only adds new node to the pg_dist_node table.
+ */
+Datum
+master_prepare_node(PG_FUNCTION_ARGS)
+{
+	text *nodeName = PG_GETARG_TEXT_P(0);
+	int32 nodePort = PG_GETARG_INT32(1);
+
+	char *nodeNameString = text_to_cstring(nodeName);
+	int32 groupId = 0;
+	char *nodeRack = WORKER_DEFAULT_RACK;
+	bool hasMetadata = false;
+	bool nodeAlreadyExists = false;
+
+	Datum returnData = AddNodeMetadata(nodeNameString, nodePort, groupId, nodeRack,
+									   hasMetadata, NODE_STATE_INACTIVE,
+									   &nodeAlreadyExists);
+
+	PG_RETURN_CSTRING(returnData);
+
+	PG_RETURN_VOID();
 }
 
 
@@ -120,8 +154,8 @@ master_remove_node(PG_FUNCTION_ARGS)
 	text *nodeName = PG_GETARG_TEXT_P(0);
 	int32 nodePort = PG_GETARG_INT32(1);
 	char *nodeNameString = text_to_cstring(nodeName);
-	bool forceRemove = false;
-	RemoveNodeFromCluster(nodeNameString, nodePort, forceRemove);
+
+	RemoveNodeFromCluster(nodeNameString, nodePort);
 
 	PG_RETURN_VOID();
 }
@@ -139,13 +173,78 @@ master_remove_node(PG_FUNCTION_ARGS)
 Datum
 master_disable_node(PG_FUNCTION_ARGS)
 {
-	text *nodeName = PG_GETARG_TEXT_P(0);
+	text *nodeNameText = PG_GETARG_TEXT_P(0);
 	int32 nodePort = PG_GETARG_INT32(1);
-	char *nodeNameString = text_to_cstring(nodeName);
-	bool forceRemove = true;
-	RemoveNodeFromCluster(nodeNameString, nodePort, forceRemove);
+
+	char *nodeName = text_to_cstring(nodeNameText);
+
+	DeleteAllReferenceTablePlacementsFromNode(nodeName, nodePort);
+	SetNodeState(nodeName, nodePort, NODE_STATE_INACTIVE);
 
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * For the time-being master_activate_node is a wrapper around
+ * ReplicateAllReferenceTablesToNode().
+ */
+Datum
+master_activate_node(PG_FUNCTION_ARGS)
+{
+	text *nodeName = PG_GETARG_TEXT_P(0);
+	int32 nodePort = PG_GETARG_INT32(1);
+
+	char *nodeNameString = text_to_cstring(nodeName);
+	WorkerNode *workerNode = FindWorkerNode(nodeNameString, nodePort);
+
+	if (workerNode == NULL)
+	{
+		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("cannot replicate reference tables to a "
+							   "non-existing node")));
+	}
+
+	ActivateNode(nodeNameString, nodePort);
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * ActivateNode activates the node with nodeName and nodePort. Currently, activation
+ * includes only replicating the reference tables.
+ */
+static void
+ActivateNode(char *nodeName, int nodePort)
+{
+	List *workerNodeList = WorkerNodeList();
+	ListCell *workerNodeCell = NULL;
+
+	foreach(workerNodeCell, workerNodeList)
+	{
+		WorkerNode *workerNode = (WorkerNode *) lfirst(workerNodeCell);
+
+		if (strcmp(workerNode->workerName, nodeName) != 0 ||
+			workerNode->workerPort != nodePort)
+		{
+			bool lockAcquired = TryLockNodeId(workerNode->nodeId, ExclusiveLock);
+
+			if (!lockAcquired)
+			{
+				ereport(ERROR, (errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+								errmsg("activation of the node %s:%d is cancelled "
+									   "because lock cannot be acquired", nodeName,
+									   nodePort)));
+			}
+
+			break;
+		}
+	}
+
+	ReplicateAllReferenceTablesToNode(nodeName, nodePort);
+
+	SetNodeState(nodeName, nodePort, NODE_STATE_ACTIVE);
 }
 
 
@@ -166,7 +265,8 @@ master_initialize_node_metadata(PG_FUNCTION_ARGS)
 		WorkerNode *workerNode = (WorkerNode *) lfirst(workerNodeCell);
 
 		AddNodeMetadata(workerNode->workerName, workerNode->workerPort, 0,
-						workerNode->workerRack, false, &nodeAlreadyExists);
+						workerNode->workerRack, false, NODE_STATE_ACTIVE,
+						&nodeAlreadyExists);
 	}
 
 	PG_RETURN_BOOL(true);
@@ -329,15 +429,14 @@ ReadWorkerNodes()
  * RemoveNodeFromCluster removes the provided node from the pg_dist_node table of
  * the master node and all nodes with metadata.
  * The call to the master_remove_node should be done by the super user. If there are
- * active shard placements on the node; the function removes the node when forceRemove
- * flag is set, it errors out otherwise.
+ * active shard placements on the node; the function errors out.
  * This function also deletes all reference table placements belong to the given node from
  * pg_dist_shard_placement, but it does not drop actual placement at the node. It also
  * modifies replication factor of the colocation group of reference tables, so that
  * replication factor will be equal to worker count.
  */
 static void
-RemoveNodeFromCluster(char *nodeName, int32 nodePort, bool forceRemove)
+RemoveNodeFromCluster(char *nodeName, int32 nodePort)
 {
 	char *nodeDeleteCommand = NULL;
 	bool hasShardPlacements = false;
@@ -379,19 +478,8 @@ RemoveNodeFromCluster(char *nodeName, int32 nodePort, bool forceRemove)
 	hasShardPlacements = NodeHasActiveShardPlacements(nodeName, nodePort);
 	if (hasShardPlacements)
 	{
-		if (forceRemove)
-		{
-			ereport(NOTICE, (errmsg("Node %s:%d has active shard placements. Some "
-									"queries may fail after this operation. Use "
-									"select master_add_node('%s', %d) to add this "
-									"node back.",
-									nodeName, nodePort, nodeName, nodePort)));
-		}
-		else
-		{
-			ereport(ERROR, (errmsg("you cannot remove a node which has active "
-								   "shard placements")));
-		}
+		ereport(ERROR, (errmsg("you cannot remove a node which has active "
+							   "shard placements")));
 	}
 
 	nodeDeleteCommand = NodeDeleteCommand(deletedNodeId);
@@ -414,7 +502,7 @@ RemoveNodeFromCluster(char *nodeName, int32 nodePort, bool forceRemove)
  */
 static Datum
 AddNodeMetadata(char *nodeName, int32 nodePort, int32 groupId, char *nodeRack,
-				bool hasMetadata, bool *nodeAlreadyExists)
+				bool hasMetadata, uint32 nodeState, bool *nodeAlreadyExists)
 {
 	Relation pgDistNode = NULL;
 	int nextNodeIdInt = 0;
@@ -465,7 +553,8 @@ AddNodeMetadata(char *nodeName, int32 nodePort, int32 groupId, char *nodeRack,
 	/* generate the new node id from the sequence */
 	nextNodeIdInt = GetNextNodeId();
 
-	InsertNodeRow(nextNodeIdInt, nodeName, nodePort, groupId, nodeRack, hasMetadata);
+	InsertNodeRow(nextNodeIdInt, nodeName, nodePort, groupId, nodeRack, hasMetadata,
+				  nodeState);
 
 	workerNode = FindWorkerNode(nodeName, nodePort);
 
@@ -485,6 +574,63 @@ AddNodeMetadata(char *nodeName, int32 nodePort, int32 groupId, char *nodeRack,
 	returnData = GenerateNodeTuple(workerNode);
 
 	return returnData;
+}
+
+
+/*
+ * SetNodeState function sets the nodestate column of the specified worker in
+ * pg_dist_node to true.
+ */
+static void
+SetNodeState(char *nodeName, int32 nodePort, uint32 nodeState)
+{
+	const bool indexOK = false;
+	const int scanKeyCount = 2;
+
+	Relation pgDistNode = NULL;
+	TupleDesc tupleDescriptor = NULL;
+	ScanKeyData scanKey[scanKeyCount];
+	SysScanDesc scanDescriptor = NULL;
+	HeapTuple heapTuple = NULL;
+	Datum values[Natts_pg_dist_node];
+	bool isnull[Natts_pg_dist_node];
+	bool replace[Natts_pg_dist_node];
+
+	pgDistNode = heap_open(DistNodeRelationId(), RowExclusiveLock);
+	tupleDescriptor = RelationGetDescr(pgDistNode);
+
+	ScanKeyInit(&scanKey[0], Anum_pg_dist_node_nodename,
+				BTEqualStrategyNumber, F_TEXTEQ, CStringGetTextDatum(nodeName));
+	ScanKeyInit(&scanKey[1], Anum_pg_dist_node_nodeport,
+				BTEqualStrategyNumber, F_INT8EQ, Int32GetDatum(nodePort));
+
+	scanDescriptor = systable_beginscan(pgDistNode, InvalidOid, indexOK,
+										NULL, scanKeyCount, scanKey);
+
+	heapTuple = systable_getnext(scanDescriptor);
+	if (!HeapTupleIsValid(heapTuple))
+	{
+		ereport(ERROR, (errmsg("could not find valid entry for node \"%s:%d\"",
+							   nodeName, nodePort)));
+	}
+
+	memset(replace, 0, sizeof(replace));
+
+	values[Anum_pg_dist_node_state - 1] = UInt32GetDatum(nodeState);
+	isnull[Anum_pg_dist_node_state - 1] = false;
+	replace[Anum_pg_dist_node_state - 1] = true;
+
+	heapTuple = heap_modify_tuple(heapTuple, tupleDescriptor, values, isnull, replace);
+	simple_heap_update(pgDistNode, &heapTuple->t_self, heapTuple);
+
+	CatalogUpdateIndexes(pgDistNode, heapTuple);
+
+	CitusInvalidateRelcacheByRelid(DistNodeRelationId());
+
+	CommandCounterIncrement();
+
+	systable_endscan(scanDescriptor);
+	heap_close(pgDistNode, NoLock);
 }
 
 
@@ -512,6 +658,7 @@ GenerateNodeTuple(WorkerNode *workerNode)
 	values[Anum_pg_dist_node_nodeport - 1] = UInt32GetDatum(workerNode->workerPort);
 	values[Anum_pg_dist_node_noderack - 1] = CStringGetTextDatum(workerNode->workerRack);
 	values[Anum_pg_dist_node_hasmetadata - 1] = BoolGetDatum(workerNode->hasMetadata);
+	values[Anum_pg_dist_node_state - 1] = UInt32GetDatum(workerNode->workerState);
 
 	/* open shard relation and insert new tuple */
 	pgDistNode = heap_open(DistNodeRelationId(), AccessShareLock);
@@ -650,7 +797,7 @@ EnsureCoordinator(void)
  */
 static void
 InsertNodeRow(int nodeid, char *nodeName, int32 nodePort, uint32 groupId, char *nodeRack,
-			  bool hasMetadata)
+			  bool hasMetadata, uint32 nodeState)
 {
 	Relation pgDistNode = NULL;
 	TupleDesc tupleDescriptor = NULL;
@@ -668,6 +815,7 @@ InsertNodeRow(int nodeid, char *nodeName, int32 nodePort, uint32 groupId, char *
 	values[Anum_pg_dist_node_nodeport - 1] = UInt32GetDatum(nodePort);
 	values[Anum_pg_dist_node_noderack - 1] = CStringGetTextDatum(nodeRack);
 	values[Anum_pg_dist_node_hasmetadata - 1] = BoolGetDatum(hasMetadata);
+	values[Anum_pg_dist_node_state - 1] = UInt32GetDatum(nodeState);
 
 	/* open shard relation and insert new tuple */
 	pgDistNode = heap_open(DistNodeRelationId(), AccessExclusiveLock);
@@ -906,6 +1054,8 @@ TupleToWorkerNode(TupleDesc tupleDescriptor, HeapTuple heapTuple)
 								  tupleDescriptor, &isNull);
 	Datum hasMetadata = heap_getattr(heapTuple, Anum_pg_dist_node_hasmetadata,
 									 tupleDescriptor, &isNull);
+	Datum nodeState = heap_getattr(heapTuple, Anum_pg_dist_node_state, tupleDescriptor,
+								   &isNull);
 
 	Assert(!HeapTupleHasNulls(heapTuple));
 
@@ -916,6 +1066,7 @@ TupleToWorkerNode(TupleDesc tupleDescriptor, HeapTuple heapTuple)
 	strlcpy(workerNode->workerName, TextDatumGetCString(nodeName), WORKER_LENGTH);
 	strlcpy(workerNode->workerRack, TextDatumGetCString(nodeRack), WORKER_LENGTH);
 	workerNode->hasMetadata = DatumGetBool(hasMetadata);
+	workerNode->workerState = DatumGetUInt32(nodeState);
 
 	return workerNode;
 }

@@ -458,7 +458,6 @@ WorkerCreateShard(Oid relationId, char *nodeName, uint32 nodePort,
 		if (queryResultList == NIL)
 		{
 			shardCreated = false;
-			break;
 		}
 	}
 
@@ -514,7 +513,6 @@ WorkerCreateShard(Oid relationId, char *nodeName, uint32 nodePort,
 		if (queryResultList == NIL)
 		{
 			shardCreated = false;
-			break;
 		}
 	}
 
