@@ -103,8 +103,8 @@ static Var * GetVarFromAssignedParam(List *parentPlannerParamList,
 									 Param *plannerParam);
 static List * GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext
 														 *joinRestrictionContext);
-static bool VarClassMemberEqualsToVarClass(VarEquivalenceClassMember *inputMember,
-										   VarEquivalenceClass *varEqClass);
+static bool VarClassContainsVarClassMember(VarEquivalenceClassMember *inputMember,
+										   VarEquivalenceClass *varEquivalenceClass);
 static VarEquivalenceClass * GenerateCommonEquivalence(List *varEquivalenceList);
 static void ListConcatUniqueEquivalanceVarClassMembers(VarEquivalenceClass **eqClass,
 													   VarEquivalenceClass *
@@ -383,15 +383,15 @@ CreateInsertSelectRouterPlan(Query *originalQuery,
  * VarEquivalenceClass. In very simple words, a VarEquivalenceClass is identified by an
  * unique id and consists of a list of VarEquivalenceMembers.
  *
- * Each VarEquivalenceMember is implemented to identity a Var uniquely within the
+ * Each VarEquivalenceMember is designed to identify a Var uniquely within the
  * whole query. The necessity of this arise since varno attributes are defined within
  * a single level of a query. Instead, here we want to identify each RTE_RELATION uniquely
  * and try to find equality among each RTE_RELATION's partition key.
  *
  * Each equality among RTE_RELATION is saved using an VarEquivalenceClass where each member
  * Var is identified by a VarEquivalenceMember. In the final step, we try generate a common
- * VarEquivalence class that holds as much as VarEquivalenceMembers whose expression is
- * a partition key.
+ * VarEquivalence class that holds as much as VarEquivalenceMembers whose expressions are
+ * a partition keys.
  *
  * AllRelationsJoinedOnPartitionKey uses both relation restrictions and join restrictions
  * to find as much as information that Postgres planner provides to extensions. For the
@@ -415,7 +415,7 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 	uint32 totalRelationCount = list_length(restrictionContext->relationRestrictionList);
 
 	ListCell *commonEqClassCell = NULL;
-	ListCell *restrictionCell = NULL;
+	ListCell *relationRestrictionCell = NULL;
 	Relids commonRteIdentities = NULL;
 
 	/*
@@ -443,8 +443,8 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 
 	/*
 	 * In general we're trying to expand existing the equivalence classes to find a
-	 * common eq class. The main goal is to test whether this main class contains all
-	 * partition keys of the existing relations.
+	 * common equivalence class. The main goal is to test whether this main class
+	 * contains all partition keys of the existing relations.
 	 */
 	commonEquivalenceClass = GenerateCommonEquivalence(partitionKeyEquivalenceList);
 
@@ -459,12 +459,13 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 	}
 
 	/* check whether all relations exists in the main restriction list */
-	foreach(restrictionCell, restrictionContext->relationRestrictionList)
+	foreach(relationRestrictionCell, restrictionContext->relationRestrictionList)
 	{
-		RelationRestriction *restriction = lfirst(restrictionCell);
+		RelationRestriction *relationRestriction = lfirst(relationRestrictionCell);
+		int rteIdentity = GetRTEIdentity(relationRestriction->rte);
 
-		if (PartitionKey(restriction->relationId) &&
-			!bms_is_member(GetRTEIdentity(restriction->rte), commonRteIdentities))
+		if (PartitionKey(relationRestriction->relationId) &&
+			!bms_is_member(rteIdentity, commonRteIdentities))
 		{
 			allRelationsJoinedOnPartitionKey = false;
 			break;
@@ -496,7 +497,7 @@ PartitionKeyEquivalenceClassList(List *varEquivalenceClassList)
 			VarEquivalenceClassMember *classMemeber = lfirst(varEquivalenceMemberCell);
 			Var *relationPartitionKey = PartitionKey(classMemeber->relationId);
 
-			/* we don't care about reference tables */
+			/* we don't care about reference tables here */
 			if (!relationPartitionKey)
 			{
 				continue;
@@ -629,7 +630,8 @@ GenerateVarEquivalencesForRelationRestrictions(RelationRestrictionContext
  *
  *   While iterating through the equivalence classes of RTE_RELATIONs, we
  *   observe that there are PARAM type of equivalence member expressions for
- *   the RTE_RELATIONs which use lateral vars from the other query levels.
+ *   the RTE_RELATIONs which actually belong to lateral vars from the other query
+ *   levels.
  *
  *   We're also keeping track of the RTE_RELATION's parent_root's
  *   plan_param list which is expected to hold the parameters that are required
@@ -639,7 +641,7 @@ GenerateVarEquivalencesForRelationRestrictions(RelationRestrictionContext
  *        make available to a lower query level that is currently being planned.
  *
  *   This function is a helper function to iterate through the parent query's
- *   plan_params and looks for the param that the equivalence member owns. The
+ *   plan_params and looks for the param that the equivalence member has. The
  *   comparison is done via the "paramid" field. Finally, if the found parameter's
  *   item is a Var, we conclude that Postgres standard_planner replaced the Var
  *   with the Param on assign_param_for_var() function
@@ -738,7 +740,7 @@ GenerateCommonEquivalence(List *varEquivalenceList)
 		ListCell *equivalenceMemberCell = NULL;
 
 		/*
-		 * This is an optimization. If we already added the same equivalance class,
+		 * This is an optimization. If we already added the same equivalence class,
 		 * we could skip it since we've already added all the relevant equivalence
 		 * members.
 		 */
@@ -753,7 +755,7 @@ GenerateCommonEquivalence(List *varEquivalenceList)
 			VarEquivalenceClassMember *varEquialanceMember =
 				lfirst(equivalenceMemberCell);
 
-			if (VarClassMemberEqualsToVarClass(varEquialanceMember,
+			if (VarClassContainsVarClassMember(varEquialanceMember,
 											   commonEquivalenceClass))
 			{
 				ListConcatUniqueEquivalanceVarClassMembers(&commonEquivalenceClass,
@@ -795,7 +797,7 @@ ListConcatUniqueEquivalanceVarClassMembers(VarEquivalenceClass **commonEqClass,
 	{
 		VarEquivalenceClassMember *newEqMember = lfirst(equivalenceClassMemberCell);
 
-		if (VarClassMemberEqualsToVarClass(newEqMember, *commonEqClass))
+		if (VarClassContainsVarClassMember(newEqMember, *commonEqClass))
 		{
 			continue;
 		}
@@ -814,7 +816,7 @@ ListConcatUniqueEquivalanceVarClassMembers(VarEquivalenceClass **commonEqClass,
  *
  * - Per join restriction
  *     - Per RestrictInfo of the join restriction
- *     - Check whether the join restriction is in (Var1 = Var2) form
+ *     - Check whether the join restriction is in the form of (Var1 = Var2)
  *         - Create a VarEquivalenceClass
  *         - Add both Var1 and Var2 to the VarEquivalenceClass
  *
@@ -900,7 +902,8 @@ GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext
  * input var equivalence class.
  *
  * Note that the input var could come from a subquery (i.e., not directly from an
- * RTE_RELATION).
+ * RTE_RELATION). That's the reason we recursively call the function until the
+ * RTE_RELATION found.
  *
  * The algorithm could be summarized as follows:
  *
@@ -913,7 +916,8 @@ GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext
  *             - recursively add both left and right sides of the set operation's
  *               corresponding target entries
  *        - if subquery is not a set operation
- *             - recursively try to add the corresponding target entry
+ *             - recursively try to add the corresponding target entry to the
+ *               equivalence class
  */
 static void
 AddToVarEquivalenceClass(PlannerInfo *root, Var *varToBeAdded,
@@ -1003,15 +1007,15 @@ AddToVarEquivalenceClass(PlannerInfo *root, Var *varToBeAdded,
 
 
 /*
- * VarClassMemberEqualsToVarClass returns true if it has any equivalent member
- * in the given varEqClass.
+ * VarClassContainsVarClassMember returns true if it the input class member
+ * is already exists in the varEquivalenceClass.
  */
 static bool
-VarClassMemberEqualsToVarClass(VarEquivalenceClassMember *inputMember,
-							   VarEquivalenceClass *varEqClass)
+VarClassContainsVarClassMember(VarEquivalenceClassMember *inputMember,
+							   VarEquivalenceClass *varEquivalenceClass)
 {
 	ListCell *classCell = NULL;
-	foreach(classCell, varEqClass->equivalentVars)
+	foreach(classCell, varEquivalenceClass->equivalentVars)
 	{
 		VarEquivalenceClassMember *memberOfClass = lfirst(classCell);
 		if (memberOfClass->rteIdendity == inputMember->rteIdendity &&
@@ -1193,12 +1197,15 @@ RouterModifyTaskForShardInterval(Query *originalQuery, ShardInterval *shardInter
 
 
 /*
- * HashedShardIntervalOpExpressions returns a list of OpExprs with exactly two
- * items in it. The list consists of shard interval ranges with hashed columns
- * such as (hashColumn >= shardMinValue) and (hashedColumn <= shardMaxValue).
+ * ShardIntervalOpExpressions returns a list of OpExprs with exactly two
+ * items in it. The list consists of shard interval ranges with partition columns
+ * such as (partitionColumn >= shardMinValue) and (partitionColumn <= shardMaxValue).
  *
- * The function errors out if the given shard interval does not belong to a hash
- * distributed table.
+ * The function returns hashed columns generated by MakeInt4Column() for the hash
+ * partitioned tables in place of partition columns.
+ *
+ * The function errors out if the given shard interval does not belong to a hash,
+ * range and append distributed tables.
  */
 static List *
 ShardIntervalOpExpressions(ShardInterval *shardInterval, Index rteIndex)
