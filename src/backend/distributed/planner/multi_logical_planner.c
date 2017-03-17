@@ -1618,6 +1618,9 @@ NeedsDistributedPlanning(Query *queryTree)
  * planning, we need to be able to figure out whether an RTE is
  * actually a copy of another, rather than a different one. We
  * simply number the RTEs starting from 1.
+ *
+ * Note that we're only interested in RTE_RELATIONs and thus assigning
+ * identifiers to those RTEs only.
  */
 void
 AssignRTEIdentities(Query *queryTree)

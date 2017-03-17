@@ -89,24 +89,24 @@ static MultiPlan * CreateInsertSelectRouterPlan(Query *originalQuery,
 												restrictionContext,
 												JoinRestrictionContext *
 												joinRestrictionContext);
+static bool AllRelationsJoinedOnPartitionKey(RelationRestrictionContext
+											*restrictionContext,
+											JoinRestrictionContext *
+											joinRestrictionContext);
+static uint32 ReferenceRelationCount(RelationRestrictionContext *restrictionContext);
+static List * GenerateVarEquivalencesForRelationRestrictions(RelationRestrictionContext
+															 *restrictionContext);
 static void AddToVarEquivalenceClass(PlannerInfo *root, Var *varToBeAdded,
 									 VarEquivalenceClass **varEquivalanceList);
-static bool AllRelationsJoinedOnPartitionKey(
-	RelationRestrictionContext *restrictionContext,
-	JoinRestrictionContext *
-	joinRestrictionContext);
-static uint32 ReferenceRelationCount(RelationRestrictionContext *restrictionContext);
-static VarEquivalenceClass * GenerateCommonPartitionKeyEquivalence(List *varEquivalences);
-static List * GenerateVarEquivalencesForRelationRestrictions(
-	RelationRestrictionContext *restrictionContext);
 static Var * GetVarFromAssignedParam(List *parentPlannerParamList,
 									 Param *plannerParam);
-static List * GenerateVarEquivalencesForJoinRestrictions(
-	JoinRestrictionContext *joinRestrictionContext);
-static void ListConcatUniqueEquivalantPartitionKeys(VarEquivalenceClass **eqClass,
-													List *eqMembers);
+static List * GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext
+														 *joinRestrictionContext);
 static bool VarClassMemberEqualsToVarClass(VarEquivalenceClassMember *inputMember,
 										   VarEquivalenceClass *varEqClass);
+static VarEquivalenceClass * GenerateCommonPartitionKeyEquivalence(List *varEquivalences);
+static void ListConcatUniqueEquivalantPartitionKeys(VarEquivalenceClass **eqClass,
+													List *eqMembers);
 static Task * RouterModifyTaskForShardInterval(Query *originalQuery,
 											   ShardInterval *shardInterval,
 											   RelationRestrictionContext *
@@ -372,16 +372,32 @@ CreateInsertSelectRouterPlan(Query *originalQuery,
 
 
 /*
- * AllRelationsJoinedOnPartitionKey expands the var equivalances gathered from
- * standard planner's relation and join hooks. The main goal of this function is
- * to deduce whether all base relations in the query are joined on their partition
- * columns or not.
+ * AllRelationsJoinedOnPartitionKey aims to deduce whether each of the RTE_RELATION
+ * is joined with at least on another RTE_RELATION on their partition keys. If each
+ * RTE_RELATION follows the above rule, we can conclude that all RTE_RELATIONs are
+ * joined on their partition keys.
  *
- * The function short circuits if there exists a single base relation in the query
- * and returns true.
+ * In order to do that, we invented a new equivalence class namely:
+ * VarEquivalenceClass. In very simple words, a VarEquivalenceClass is identified by an
+ * unique id and consists of a list of VarEquivalenceMembers.
  *
- * Also reference tables, which don't have partition columns, treated separately such
- * that they are always counted as joined on the partition key.
+ * Each VarEquivalenceMember is implemented to identity a Var uniquely within the
+ * whole query. The necessity of this arise since varno attributes are defined within
+ * a single level of a query. Instead, here we want to identify each RTE_RELATION uniquely
+ * and try to find equality among each RTE_RELATION's partition key.
+ *
+ * Each equality among RTE_RELATION is saved using an VarEquivalenceClass where each member
+ * Var is identified by a VarEquivalenceMember. In the final step, we try generate a common
+ * VarEquivalence class that holds as much as VarEquivalenceMembers whose expression is
+ * a partition key.
+ *
+ * AllRelationsJoinedOnPartitionKey uses both relation restrictions and join restrictions
+ * to find as much as information that Postgres planner provides to extensions. For the
+ * details of the usage, please see GenerateVarEquivalencesForRelationRestrictions()
+ * and GenerateVarEquivalencesForJoinRestrictions()
+ *
+ * Finally, as the name of the function reveals, the function returns true if all relations
+ * are joined on their partition keys. Otherwise, the function returns false.
  */
 static bool
 AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
@@ -408,7 +424,7 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 		return true;
 	}
 
-	/* reset the equivalence id counter per call */
+	/* reset the equivalence id counter per call to prevent overflows */
 	varEquivalenceId = 1;
 
 	relationRestrictionVarEquivalences =
@@ -477,8 +493,152 @@ ReferenceRelationCount(RelationRestrictionContext *restrictionContext)
 
 
 /*
+ * GenerateVarEquivalencesForRelationRestrictions gets a relation restriction
+ * context and returns a list of VarEquivalenceClass.
+ *
+ * The algorithm followed can be summarized as below:
+ *
+ * - Per relation restriction
+ *     - Per plannerInfo's eq_class
+ *         - Create a VarEquivalenceClass
+ *         - Add all Vars that appear in the plannerInfo's
+ *           eq_class to the VarEquivalenceClass
+ *               - While doing that, consider LATERAL vars as well.
+ *                 See GetVarFromAssignedParam() for the details. Note
+ *                 that we're using parentPlannerInfo while adding the
+ *                 LATERAL vars given that we rely on that plannerInfo.
+ *
+ * Note that this function does not deal with whether the member of eq_classes
+ * are partition key or not. That's handled later in the planning.
+ */
+static List *
+GenerateVarEquivalencesForRelationRestrictions(RelationRestrictionContext
+											   *restrictionContext)
+{
+	List *varEquivalences = NIL;
+	ListCell *relationRestrictionCell = NULL;
+
+	foreach(relationRestrictionCell, restrictionContext->relationRestrictionList)
+	{
+		RelationRestriction *relationRestriction = lfirst(relationRestrictionCell);
+		List *equivalenceClasses = relationRestriction->plannerInfo->eq_classes;
+		ListCell *equivilanceClassCell = NULL;
+		PlannerInfo *plannerInfo = relationRestriction->plannerInfo;
+
+		foreach(equivilanceClassCell, equivalenceClasses)
+		{
+			EquivalenceClass *plannerEqClass = lfirst(equivilanceClassCell);
+			ListCell *equivilanceMemberCell = NULL;
+			VarEquivalenceClass *varEquivalance = palloc0(sizeof(VarEquivalenceClass));
+			varEquivalance->equivalenceId = varEquivalenceId++;
+
+			foreach(equivilanceMemberCell, plannerEqClass->ec_members)
+			{
+				EquivalenceMember *equivalenceMember = lfirst(equivilanceMemberCell);
+				Node *equivalenceNode = strip_implicit_coercions(
+					(Node *) equivalenceMember->em_expr);
+				Expr *strippedEquivalenceExpr = (Expr *) equivalenceNode;
+
+				Var *expressionVar = NULL;
+
+				if (IsA(strippedEquivalenceExpr, Param))
+				{
+					List *parentParamList = relationRestriction->parentPlannerParamList;
+					Param *equivalenceParam = (Param *) strippedEquivalenceExpr;
+
+					expressionVar = GetVarFromAssignedParam(parentParamList,
+															equivalenceParam);
+					if (expressionVar)
+					{
+						AddToVarEquivalenceClass(relationRestriction->parentPlannerInfo,
+												 expressionVar,
+												 &varEquivalance);
+					}
+				}
+				else if (IsA(strippedEquivalenceExpr, Var))
+				{
+					expressionVar = (Var *) strippedEquivalenceExpr;
+					AddToVarEquivalenceClass(plannerInfo, expressionVar, &varEquivalance);
+				}
+			}
+
+			varEquivalences = lappend(varEquivalences, varEquivalance);
+		}
+	}
+
+	return varEquivalences;
+}
+
+
+/*
+ * Rationale behind this function:
+ *
+ *   While iterating through the equivalence classes of RTE_RELATIONs, we
+ *   observe that there are PARAM type of equivalence member expressions for
+ *   the RTE_RELATIONs which use lateral vars from the other query levels.
+ *
+ *   We're also keeping track of the RTE_RELATION's parent_root's
+ *   plan_param list which is expected to hold the parameters that are required
+ *   for its lower level queries as it is documented:
+ *
+ *        plan_params contains the expressions that this query level needs to
+ *        make available to a lower query level that is currently being planned.
+ *
+ *   This function is a helper function to iterate through the parent query's
+ *   plan_params and looks for the param that the equivalence member owns. The
+ *   comparison is done via the "paramid" field. Finally, if the found parameter's
+ *   item is a Var, we conclude that Postgres standard_planner replaced the Var
+ *   with the Param on assign_param_for_var() function
+ *   @src/backend/optimizer//plan/subselect.c.
+ *
+ * GetVarFromAssignedParam returns the Var that is assigned to the given
+ * plannerParam if its kind is PARAM_EXEC.
+ *
+ * If the paramkind is not equal to PARAM_EXEC the function returns NULL. Similarly,
+ * if there is no var that the given param is assigned to, the function returns NULL.
+ */
+static Var *
+GetVarFromAssignedParam(List *parentPlannerParamList, Param *plannerParam)
+{
+	Var *assignedVar = NULL;
+	ListCell *plannerParameterCell = NULL;
+
+	Assert(plannerParam != NULL);
+
+	/* we're only interested in parameters that Postgres added for execution */
+	if (plannerParam->paramkind != PARAM_EXEC)
+	{
+		return NULL;
+	}
+
+	foreach(plannerParameterCell, parentPlannerParamList)
+	{
+		PlannerParamItem *plannerParamItem = lfirst(plannerParameterCell);
+
+		if (plannerParamItem->paramId != plannerParam->paramid)
+		{
+			continue;
+		}
+
+		/* TODO: Should we consider PlaceHolderVar?? */
+		if (!IsA(plannerParamItem->item, Var))
+		{
+			continue;
+		}
+
+		assignedVar = (Var *) plannerParamItem->item;
+
+		break;
+	}
+
+	return assignedVar;
+}
+
+
+
+/*
  * GenerateCommonPartitionKeyEquivalence gets a list of varEquivalenceClasses
- * and forms a single equivalance class which has all the equivalent Vars
+ * and forms a single equivalence class which has all the equivalent Vars
  * that are actually partition columns.
  */
 static VarEquivalenceClass *
@@ -517,8 +677,8 @@ GenerateCommonPartitionKeyEquivalence(List *varEquivalences)
 
 		foreach(equivalenceMemberCell, eqClass->equivalentVars)
 		{
-			VarEquivalenceClassMember *varEquialanceMember = lfirst(
-				equivalenceMemberCell);
+			VarEquivalenceClassMember *varEquialanceMember =
+					lfirst(equivalenceMemberCell);
 
 			/* add the initial var to the main list. We should add a partition key. */
 			if (list_length(mainEquivalenceClass->equivalentVars) == 0)
@@ -577,189 +737,6 @@ GenerateCommonPartitionKeyEquivalence(List *varEquivalences)
 
 
 /*
- * Per each relation restriction. get the eq_classes that is in the plannerInfo.
- * Then, add all the equivalent members of a class to a var equivalence class.
- */
-static List *
-GenerateVarEquivalencesForRelationRestrictions(
-	RelationRestrictionContext *restrictionContext)
-{
-	List *varEquivalences = NIL;
-	ListCell *relationRestrictionCell = NULL;
-
-	foreach(relationRestrictionCell, restrictionContext->relationRestrictionList)
-	{
-		RelationRestriction *relationRestriction = lfirst(relationRestrictionCell);
-		List *equivalenceClasses = relationRestriction->plannerInfo->eq_classes;
-		ListCell *equivilanceClassCell = NULL;
-		PlannerInfo *plannerInfo = relationRestriction->plannerInfo;
-
-		foreach(equivilanceClassCell, equivalenceClasses)
-		{
-			EquivalenceClass *plannerEqClass = lfirst(equivilanceClassCell);
-			ListCell *equivilanceMemberCell = NULL;
-			VarEquivalenceClass *varEquivalance = palloc0(sizeof(VarEquivalenceClass));
-			varEquivalance->equivalenceId = varEquivalenceId++;
-
-			foreach(equivilanceMemberCell, plannerEqClass->ec_members)
-			{
-				EquivalenceMember *equivalenceMember = lfirst(equivilanceMemberCell);
-				Node *equivalenceNode = strip_implicit_coercions(
-					(Node *) equivalenceMember->em_expr);
-				Expr *strippedEquivalenceExpr = (Expr *) equivalenceNode;
-
-				Var *expressionVar = NULL;
-
-				if (IsA(strippedEquivalenceExpr, Param))
-				{
-					List *parentParamList = relationRestriction->parentPlannerParamList;
-					Param *equivalenceParam = (Param *) strippedEquivalenceExpr;
-
-					expressionVar = GetVarFromAssignedParam(parentParamList,
-															equivalenceParam);
-					if (expressionVar)
-					{
-						AddToVarEquivalenceClass(relationRestriction->parentPlannerInfo,
-												 expressionVar,
-												 &varEquivalance);
-					}
-				}
-				else if (IsA(strippedEquivalenceExpr, Var))
-				{
-					expressionVar = (Var *) strippedEquivalenceExpr;
-					AddToVarEquivalenceClass(plannerInfo, expressionVar, &varEquivalance);
-				}
-			}
-
-			varEquivalences = lappend(varEquivalences, varEquivalance);
-		}
-	}
-
-	return varEquivalences;
-}
-
-
-/*
- * GetVarFromAssignedParam returns the Var that is assigned to the given
- * plannerParam if its kind is PARAM_EXEC.
- *
- * If the paramkind is not equal to PARAM_EXEC the function returns NULL. Similarly,
- * if there is no var that the given param is assigned to, the function returns NULL.
- */
-static Var *
-GetVarFromAssignedParam(List *parentPlannerParamList, Param *plannerParam)
-{
-	Var *assignedVar = NULL;
-	ListCell *plannerParameterCell = NULL;
-
-	Assert(plannerParam != NULL);
-
-	/* we're only interested in parameters that Postgres added for execution */
-	if (plannerParam->paramkind != PARAM_EXEC)
-	{
-		return NULL;
-	}
-
-	foreach(plannerParameterCell, parentPlannerParamList)
-	{
-		PlannerParamItem *plannerParamItem = lfirst(plannerParameterCell);
-
-		if (plannerParamItem->paramId != plannerParam->paramid)
-		{
-			continue;
-		}
-
-		/* TODO: Should we consider PlaceHolderVar?? */
-		if (!IsA(plannerParamItem->item, Var))
-		{
-			continue;
-		}
-
-		assignedVar = (Var *) plannerParamItem->item;
-
-		break;
-	}
-
-	return assignedVar;
-}
-
-
-/*
- * We now added a join restriction that keeps track of non anti join restrictions.
- * For those joins, use the generated restriction information. Then, add all the
- * join restriction information members of a class to a var equivalence class.
- */
-static List *
-GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext *joinRestrictionContext)
-{
-	List *varEquivalences = NIL;
-	ListCell *joinRestrictionCell = NULL;
-
-	foreach(joinRestrictionCell, joinRestrictionContext->joinRestrictionList)
-	{
-		JoinRestriction *joinRestriction = lfirst(joinRestrictionCell);
-		ListCell *restrictionInfoList = NULL;
-
-		VarEquivalenceClass *varEquivalance = palloc0(sizeof(VarEquivalenceClass));
-		varEquivalance->equivalenceId = varEquivalenceId++;
-
-		foreach(restrictionInfoList, joinRestriction->joinRestrictInfoList)
-		{
-			RestrictInfo *rinfo = (RestrictInfo *) lfirst(restrictionInfoList);
-			OpExpr *restrictionOpExpr = NULL;
-			Node *leftNode = NULL;
-			Node *rightNode = NULL;
-			Expr *strippedLeftExpr = NULL;
-			Expr *strippedRightExpr = NULL;
-			Var *leftVar = NULL;
-			Var *rightVar = NULL;
-			Expr *restrictionClause = rinfo->clause;
-
-			if (!IsA(restrictionClause, OpExpr))
-			{
-				continue;
-			}
-
-			restrictionOpExpr = (OpExpr *) restrictionClause;
-			if (list_length(restrictionOpExpr->args) != 2)
-			{
-				continue;
-			}
-			if (!OperatorImplementsEquality(restrictionOpExpr->opno))
-			{
-				continue;
-			}
-
-			leftNode = linitial(restrictionOpExpr->args);
-			rightNode = lsecond(restrictionOpExpr->args);
-
-			/* we also don't want implicit coercions */
-			strippedLeftExpr = (Expr *) strip_implicit_coercions((Node *) leftNode);
-			strippedRightExpr = (Expr *) strip_implicit_coercions((Node *) rightNode);
-
-			if (!(IsA(strippedLeftExpr, Var) && IsA(strippedRightExpr, Var)))
-			{
-				continue;
-			}
-
-			leftVar = (Var *) strippedLeftExpr;
-			rightVar = (Var *) strippedRightExpr;
-
-			/* we could (probably) safely do that since we disallowed ANTI JOINs ? */
-			AddToVarEquivalenceClass(joinRestriction->plannerInfo, leftVar,
-									 &varEquivalance);
-			AddToVarEquivalenceClass(joinRestriction->plannerInfo, rightVar,
-									 &varEquivalance);
-
-			varEquivalences = lappend(varEquivalences, varEquivalance);
-		}
-	}
-
-	return varEquivalences;
-}
-
-
-/*
  * ListConcatUniqueEquivalancePartitionKeys get the common equivalence class and
  * a new equivalence class. It iterates on the members of the new class and adds
  * the partition key members which are equivalant to the common class.
@@ -797,13 +774,113 @@ ListConcatUniqueEquivalantPartitionKeys(VarEquivalenceClass **commonEqClass,
 
 
 /*
- * TODO: (Andres asked) could the rte_relation that we're adding the eq.
- * be part of ANTI-JOIN?
+ * GenerateVarEquivalencesForJoinRestrictions gets a join restriction
+ * context and returns a list of VarEquivalenceClass.
  *
- * AddToVarEquivalenceClass add the varToBeAdded to the given varEquivalanceClass.
- * The function add the varToBeAdd if it belongs to a relation. If the varToBeAdded
- * belongs to a subquery, the function recursively calls itself until it finds the
- * relation that the var actually belongs to.
+ * The algorithm followed can be summarized as below:
+ *
+ * - Per join restriction
+ *     - Per RestrictInfo of the join restriction
+ *     - Check whether the join restriction is in (Var1 = Var2) form
+ *         - Create a VarEquivalenceClass
+ *         - Add both Var1 and Var2 to the VarEquivalenceClass
+ *
+ * Note that this function does not deal with whether the member of restriction
+ * are partition key or not. That's handled later in the planning.
+ */
+static List *
+GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext
+										   *joinRestrictionContext)
+{
+	List *varEquivalences = NIL;
+	ListCell *joinRestrictionCell = NULL;
+
+	foreach(joinRestrictionCell, joinRestrictionContext->joinRestrictionList)
+	{
+		JoinRestriction *joinRestriction = lfirst(joinRestrictionCell);
+		ListCell *restrictionInfoList = NULL;
+
+		foreach(restrictionInfoList, joinRestriction->joinRestrictInfoList)
+		{
+			RestrictInfo *rinfo = (RestrictInfo *) lfirst(restrictionInfoList);
+			OpExpr *restrictionOpExpr = NULL;
+			Node *leftNode = NULL;
+			Node *rightNode = NULL;
+			Expr *strippedLeftExpr = NULL;
+			Expr *strippedRightExpr = NULL;
+			Var *leftVar = NULL;
+			Var *rightVar = NULL;
+			Expr *restrictionClause = rinfo->clause;
+			VarEquivalenceClass *varEquivalance = NULL;
+
+			if (!IsA(restrictionClause, OpExpr))
+			{
+				continue;
+			}
+
+			restrictionOpExpr = (OpExpr *) restrictionClause;
+			if (list_length(restrictionOpExpr->args) != 2)
+			{
+				continue;
+			}
+			if (!OperatorImplementsEquality(restrictionOpExpr->opno))
+			{
+				continue;
+			}
+
+			leftNode = linitial(restrictionOpExpr->args);
+			rightNode = lsecond(restrictionOpExpr->args);
+
+			/* we also don't want implicit coercions */
+			strippedLeftExpr = (Expr *) strip_implicit_coercions((Node *) leftNode);
+			strippedRightExpr = (Expr *) strip_implicit_coercions((Node *) rightNode);
+
+			if (!(IsA(strippedLeftExpr, Var) && IsA(strippedRightExpr, Var)))
+			{
+				continue;
+			}
+
+			leftVar = (Var *) strippedLeftExpr;
+			rightVar = (Var *) strippedRightExpr;
+
+			varEquivalance = palloc0(sizeof(VarEquivalenceClass));
+			varEquivalance->equivalenceId = varEquivalenceId++;
+
+			/* we could (probably) safely do that since we disallowed ANTI JOINs ? */
+			AddToVarEquivalenceClass(joinRestriction->plannerInfo, leftVar,
+									 &varEquivalance);
+			AddToVarEquivalenceClass(joinRestriction->plannerInfo, rightVar,
+									 &varEquivalance);
+
+			varEquivalences = lappend(varEquivalences, varEquivalance);
+		}
+	}
+
+	return varEquivalences;
+}
+
+
+/*
+ * AddToVarEquivalenceClass is a key function for building the var equivalences. The
+ * function gets a plannerInfo, var and var equivalence class. It searches for the
+ * RTE_RELATION(s) that the input var belongs to and adds the found Var(s) to the
+ * input var equivalence class.
+ *
+ * Note that the input var could come from a subquery (i.e., not directly from an
+ * RTE_RELATION).
+ *
+ * The algorithm could be summarized as follows:
+ *
+ *    - If the RTE that corresponds to a relation
+ *        - Generate a VarEquivalenceMember and add to the input
+ *          VarEquilvanceClass
+ *    - If the RTE that corresponds to a subquery
+ *        - Find the corresponding target entry via varno
+ *        - if subquery entry is a set operation (i.e., only UNION/UNION ALL allowed)
+ *             - recursively add both left and right sides of the set operation's
+ *               corresponding target entries
+ *        - if subquery is not a set operation
+ *             - recursively try to add the corresponding target entry
  */
 static void
 AddToVarEquivalenceClass(PlannerInfo *root, Var *varToBeAdded,
@@ -865,6 +942,8 @@ AddToVarEquivalenceClass(PlannerInfo *root, Var *varToBeAdded,
 		}
 
 		varToBeAdded = (Var *) subqueryTargetEntry->expr;
+
+		/* we need to handle set operations separately */
 		if (subquery->setOperations)
 		{
 			SetOperationStmt *unionStatement =
@@ -881,7 +960,6 @@ AddToVarEquivalenceClass(PlannerInfo *root, Var *varToBeAdded,
 			AddToVarEquivalenceClass(baseRelOptInfo->subroot, varToBeAdded,
 									 varEquivalanceClass);
 		}
-		/* Can only handle a simple Var of subquery's query level */
 		else if (varToBeAdded && IsA(varToBeAdded, Var) && varToBeAdded->varlevelsup == 0)
 		{
 			AddToVarEquivalenceClass(baseRelOptInfo->subroot, varToBeAdded,

@@ -623,6 +623,7 @@ multi_relation_restriction_hook(PlannerInfo *root, RelOptInfo *relOptInfo, Index
 	relationRestriction->parentPlannerInfo = root->parent_root;
 	relationRestriction->prunedShardIntervalList = NIL;
 
+	/* see comments on GetVarFromAssignedParam() */
 	if (relationRestriction->parentPlannerInfo)
 	{
 		relationRestriction->parentPlannerParamList =
