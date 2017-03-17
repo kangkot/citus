@@ -90,9 +90,9 @@ static MultiPlan * CreateInsertSelectRouterPlan(Query *originalQuery,
 												JoinRestrictionContext *
 												joinRestrictionContext);
 static bool AllRelationsJoinedOnPartitionKey(RelationRestrictionContext
-											*restrictionContext,
-											JoinRestrictionContext *
-											joinRestrictionContext);
+											 *restrictionContext,
+											 JoinRestrictionContext *
+											 joinRestrictionContext);
 static uint32 ReferenceRelationCount(RelationRestrictionContext *restrictionContext);
 static List * GenerateVarEquivalencesForRelationRestrictions(RelationRestrictionContext
 															 *restrictionContext);
@@ -635,7 +635,6 @@ GetVarFromAssignedParam(List *parentPlannerParamList, Param *plannerParam)
 }
 
 
-
 /*
  * GenerateCommonPartitionKeyEquivalence gets a list of varEquivalenceClasses
  * and forms a single equivalence class which has all the equivalent Vars
@@ -678,7 +677,7 @@ GenerateCommonPartitionKeyEquivalence(List *varEquivalences)
 		foreach(equivalenceMemberCell, eqClass->equivalentVars)
 		{
 			VarEquivalenceClassMember *varEquialanceMember =
-					lfirst(equivalenceMemberCell);
+				lfirst(equivalenceMemberCell);
 
 			/* add the initial var to the main list. We should add a partition key. */
 			if (list_length(mainEquivalenceClass->equivalentVars) == 0)
