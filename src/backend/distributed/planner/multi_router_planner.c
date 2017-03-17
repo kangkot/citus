@@ -106,8 +106,9 @@ static List * GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext
 static bool VarClassMemberEqualsToVarClass(VarEquivalenceClassMember *inputMember,
 										   VarEquivalenceClass *varEqClass);
 static VarEquivalenceClass * GenerateCommonEquivalence(List *varEquivalenceList);
-static void ListConcatUniqueEquivalantPartitionKeys(VarEquivalenceClass **eqClass,
-													List *eqMembers);
+static void ListConcatUniqueEquivalanceVarClassMembers(VarEquivalenceClass **eqClass,
+													   VarEquivalenceClass *
+													   newEquivalenceClass);
 static Task * RouterModifyTaskForShardInterval(Query *originalQuery,
 											   ShardInterval *shardInterval,
 											   RelationRestrictionContext *
@@ -755,9 +756,8 @@ GenerateCommonEquivalence(List *varEquivalenceList)
 			if (VarClassMemberEqualsToVarClass(varEquialanceMember,
 											   commonEquivalenceClass))
 			{
-				ListConcatUniqueEquivalantPartitionKeys(&commonEquivalenceClass,
-														currentEquivalenceClass->
-														equivalentVars);
+				ListConcatUniqueEquivalanceVarClassMembers(&commonEquivalenceClass,
+														   currentEquivalenceClass);
 
 				addedEquivalenceIds = bms_add_member(addedEquivalenceIds,
 													 currentEquivalenceClass->
@@ -780,30 +780,20 @@ GenerateCommonEquivalence(List *varEquivalenceList)
 
 
 /*
- * ListConcatUniqueEquivalancePartitionKeys get the common equivalence class and
- * a new equivalence class. It iterates on the members of the new class and adds
- * the partition key members which are equivalant to the common class.
+ * ListConcatUniqueEquivalancePartitionKeys gets two var equivalence classes. It
+ * basically concatenates var equivalence member lists uniquely and updates the
+ * commonEqClass' member list with the list.
  */
 static void
-ListConcatUniqueEquivalantPartitionKeys(VarEquivalenceClass **commonEqClass,
-										List *newEqClass)
+ListConcatUniqueEquivalanceVarClassMembers(VarEquivalenceClass **commonEqClass,
+										   VarEquivalenceClass *newEquivalenceClass)
 {
-	ListCell *newEqClassCell = NULL;
+	ListCell *equivalenceClassMemberCell = NULL;
+	List *equivalenceMemberList = newEquivalenceClass->equivalentVars;
 
-	foreach(newEqClassCell, newEqClass)
+	foreach(equivalenceClassMemberCell, equivalenceMemberList)
 	{
-		VarEquivalenceClassMember *newEqMember = lfirst(newEqClassCell);
-		Var *relationPartitionKey = PartitionKey(newEqMember->relationId);
-
-		if (!relationPartitionKey)
-		{
-			continue;
-		}
-
-		if (relationPartitionKey->varattno != newEqMember->varattno)
-		{
-			continue;
-		}
+		VarEquivalenceClassMember *newEqMember = lfirst(equivalenceClassMemberCell);
 
 		if (VarClassMemberEqualsToVarClass(newEqMember, *commonEqClass))
 		{
