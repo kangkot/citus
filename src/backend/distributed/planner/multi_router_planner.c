@@ -93,6 +93,7 @@ static bool AllRelationsJoinedOnPartitionKey(RelationRestrictionContext
 											 *restrictionContext,
 											 JoinRestrictionContext *
 											 joinRestrictionContext);
+static List * PartitionKeyEquivalenceClassList(List *varEquivalenceClassList);
 static uint32 ReferenceRelationCount(RelationRestrictionContext *restrictionContext);
 static List * GenerateVarEquivalencesForRelationRestrictions(RelationRestrictionContext
 															 *restrictionContext);
@@ -104,7 +105,7 @@ static List * GenerateVarEquivalencesForJoinRestrictions(JoinRestrictionContext
 														 *joinRestrictionContext);
 static bool VarClassMemberEqualsToVarClass(VarEquivalenceClassMember *inputMember,
 										   VarEquivalenceClass *varEqClass);
-static VarEquivalenceClass * GenerateCommonPartitionKeyEquivalence(List *varEquivalences);
+static VarEquivalenceClass * GenerateCommonEquivalence(List *varEquivalenceList);
 static void ListConcatUniqueEquivalantPartitionKeys(VarEquivalenceClass **eqClass,
 													List *eqMembers);
 static Task * RouterModifyTaskForShardInterval(Query *originalQuery,
@@ -406,6 +407,7 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 	List *relationRestrictionVarEquivalences = NIL;
 	List *joinRestrictionVarEquivalences = NIL;
 	List *varEquivalences = NIL;
+	List *partitionKeyEquivalenceList = NIL;
 	VarEquivalenceClass *commonEquivalenceClass = NULL;
 	bool allRelationsJoinedOnPartitionKey = true;
 	uint32 referenceRelationCount = ReferenceRelationCount(restrictionContext);
@@ -413,7 +415,7 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 
 	ListCell *commonEqClassCell = NULL;
 	ListCell *restrictionCell = NULL;
-	Relids commonRelids = NULL;
+	Relids commonRteIdentities = NULL;
 
 	/*
 	 * If there are no JOINs between non-reference tables, we shouldn't
@@ -435,20 +437,24 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 	varEquivalences = list_concat(relationRestrictionVarEquivalences,
 								  joinRestrictionVarEquivalences);
 
+	/* filter out non-partition key equivalences */
+	partitionKeyEquivalenceList = PartitionKeyEquivalenceClassList(varEquivalences);
+
 	/*
 	 * In general we're trying to expand existing the equivalence classes to find a
 	 * common eq class. The main goal is to test whether this main class contains all
 	 * partition keys of the existing relations.
 	 */
-	commonEquivalenceClass = GenerateCommonPartitionKeyEquivalence(varEquivalences);
+	commonEquivalenceClass = GenerateCommonEquivalence(partitionKeyEquivalenceList);
 
 
 	/* add the rte indexes of relations to a bitmap */
 	foreach(commonEqClassCell, commonEquivalenceClass->equivalentVars)
 	{
 		VarEquivalenceClassMember *classMember = lfirst(commonEqClassCell);
+		int rteIdentity = classMember->rteIdendity;
 
-		commonRelids = bms_add_member(commonRelids, classMember->rteIdendity);
+		commonRteIdentities = bms_add_member(commonRteIdentities, rteIdentity);
 	}
 
 	/* check whether all relations exists in the main restriction list */
@@ -457,7 +463,7 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 		RelationRestriction *restriction = lfirst(restrictionCell);
 
 		if (PartitionKey(restriction->relationId) &&
-			!bms_is_member(GetRTEIdentity(restriction->rte), commonRelids))
+			!bms_is_member(GetRTEIdentity(restriction->rte), commonRteIdentities))
 		{
 			allRelationsJoinedOnPartitionKey = false;
 			break;
@@ -465,6 +471,53 @@ AllRelationsJoinedOnPartitionKey(RelationRestrictionContext *restrictionContext,
 	}
 
 	return allRelationsJoinedOnPartitionKey;
+}
+
+
+/*
+ * PartitionKeyEquivalenceClassList gets a list of var equivalences. Then, filters
+ * out the ones whose all members are not partition keys.
+ */
+static List *
+PartitionKeyEquivalenceClassList(List *varEquivalenceClassList)
+{
+	ListCell *varEquivalenceClassCell = NULL;
+	List *partitionKeyEquivalencClassList = NIL;
+
+	foreach(varEquivalenceClassCell, varEquivalenceClassList)
+	{
+		VarEquivalenceClass *varEquivalenceClass = lfirst(varEquivalenceClassCell);
+		ListCell *varEquivalenceMemberCell = NULL;
+		bool allPartitionKeys = true;
+
+		foreach(varEquivalenceMemberCell, varEquivalenceClass->equivalentVars)
+		{
+			VarEquivalenceClassMember *classMemeber = lfirst(varEquivalenceMemberCell);
+			Var *relationPartitionKey = PartitionKey(classMemeber->relationId);
+
+			/* we don't care about reference tables */
+			if (!relationPartitionKey)
+			{
+				continue;
+			}
+
+			if (relationPartitionKey->varattno != classMemeber->varattno)
+			{
+				allPartitionKeys = false;
+				break;
+			}
+		}
+
+		if (!allPartitionKeys)
+		{
+			continue;
+		}
+
+		partitionKeyEquivalencClassList = lappend(partitionKeyEquivalencClassList,
+												  varEquivalenceClass);
+	}
+
+	return partitionKeyEquivalencClassList;
 }
 
 
@@ -636,32 +689,51 @@ GetVarFromAssignedParam(List *parentPlannerParamList, Param *plannerParam)
 
 
 /*
- * GenerateCommonPartitionKeyEquivalence gets a list of varEquivalenceClasses
- * and forms a single equivalence class which has all the equivalent Vars
- * that are actually partition columns.
+ * GenerateCommonEquivalence gets a list of unrelated VarEquiavalanceClass
+ * whose all members are partition keys.
+ *
+ * With the equivalence classes, the function follows the algorithm
+ * outlined below:
+ *
+ *     - Add the first equivalence class to the common equivalence class
+ *     - Then, iterate on the remaining equivalence classes
+ *          - If any of the members equal to the common equivalence class
+ *            add all the members of the equivalence class to the common
+ *            class
+ *          - Start the iteration from the beginning. The reason is that
+ *            in case any of the classes we've passed is equivalent to the
+ *            newly added one. To optimize the algorithm, we utilze the
+ *            equivalence class ids and skip the ones that are already added.
+ *      - Finally, return the common equivalence class.
  */
 static VarEquivalenceClass *
-GenerateCommonPartitionKeyEquivalence(List *varEquivalences)
+GenerateCommonEquivalence(List *varEquivalenceList)
 {
-	VarEquivalenceClass *mainEquivalenceClass = NULL;
+	VarEquivalenceClass *commonEquivalenceClass = NULL;
+	VarEquivalenceClass *firstEquivalenceClass = NULL;
 	Bitmapset *addedEquivalenceIds = NULL;
-	uint32 eqClassSize = list_length(varEquivalences);
+	uint32 equivalenceListSize = list_length(varEquivalenceList);
 	uint32 equivalenceClassIndex = 0;
 
-	mainEquivalenceClass = palloc0(sizeof(VarEquivalenceClass));
-	mainEquivalenceClass->equivalenceId = 0;
-	mainEquivalenceClass->equivalentVars = NIL;
+	commonEquivalenceClass = palloc0(sizeof(VarEquivalenceClass));
+	commonEquivalenceClass->equivalenceId = 0;
 
 	/* think more on this. */
-	if (eqClassSize < 1)
+	if (equivalenceListSize < 1)
 	{
-		return mainEquivalenceClass;
+		return commonEquivalenceClass;
 	}
 
+	/* setup the initial state of the main equivalence class */
+	firstEquivalenceClass = linitial(varEquivalenceList);
+	commonEquivalenceClass->equivalentVars = firstEquivalenceClass->equivalentVars;
+	addedEquivalenceIds = bms_add_member(addedEquivalenceIds,
+										 firstEquivalenceClass->equivalenceId);
 
-	for (; equivalenceClassIndex < eqClassSize; ++equivalenceClassIndex)
+	for (; equivalenceClassIndex < equivalenceListSize; ++equivalenceClassIndex)
 	{
-		VarEquivalenceClass *eqClass = list_nth(varEquivalences, equivalenceClassIndex);
+		VarEquivalenceClass *currentEquivalenceClass = list_nth(varEquivalenceList,
+																equivalenceClassIndex);
 		ListCell *equivalenceMemberCell = NULL;
 
 		/*
@@ -669,55 +741,27 @@ GenerateCommonPartitionKeyEquivalence(List *varEquivalences)
 		 * we could skip it since we've already added all the relevant equivalence
 		 * members.
 		 */
-		if (bms_overlap(addedEquivalenceIds, bms_make_singleton(eqClass->equivalenceId)))
+		if (bms_overlap(addedEquivalenceIds,
+						bms_make_singleton(currentEquivalenceClass->equivalenceId)))
 		{
 			continue;
 		}
 
-		foreach(equivalenceMemberCell, eqClass->equivalentVars)
+		foreach(equivalenceMemberCell, currentEquivalenceClass->equivalentVars)
 		{
 			VarEquivalenceClassMember *varEquialanceMember =
 				lfirst(equivalenceMemberCell);
 
-			/* add the initial var to the main list. We should add a partition key. */
-			if (list_length(mainEquivalenceClass->equivalentVars) == 0)
+			if (VarClassMemberEqualsToVarClass(varEquialanceMember,
+											   commonEquivalenceClass))
 			{
-				Var *relationPartitionKey = PartitionKey(varEquialanceMember->relationId);
-
-				if (!relationPartitionKey)
-				{
-					continue;
-				}
-
-				if (relationPartitionKey->varattno != varEquialanceMember->varattno)
-				{
-					continue;
-				}
-
-				/* we've found a partition key, we'll add all the equivalent members */
-				ListConcatUniqueEquivalantPartitionKeys(&mainEquivalenceClass,
-														eqClass->equivalentVars);
+				ListConcatUniqueEquivalantPartitionKeys(&commonEquivalenceClass,
+														currentEquivalenceClass->
+														equivalentVars);
 
 				addedEquivalenceIds = bms_add_member(addedEquivalenceIds,
-													 eqClass->equivalenceId);
-
-				/*
-				 * It seems inefficient to start from the beginning.
-				 * But, we should somehow restart from the beginning to test that
-				 * whether the already skipped ones are equal or not.
-				 */
-				equivalenceClassIndex = 0;
-
-				break;
-			}
-			else if (VarClassMemberEqualsToVarClass(varEquialanceMember,
-													mainEquivalenceClass))
-			{
-				ListConcatUniqueEquivalantPartitionKeys(&mainEquivalenceClass,
-														eqClass->equivalentVars);
-
-				addedEquivalenceIds = bms_add_member(addedEquivalenceIds,
-													 eqClass->equivalenceId);
+													 currentEquivalenceClass->
+													 equivalenceId);
 
 				/*
 				 * It seems inefficient to start from the beginning.
@@ -731,7 +775,7 @@ GenerateCommonPartitionKeyEquivalence(List *varEquivalences)
 		}
 	}
 
-	return mainEquivalenceClass;
+	return commonEquivalenceClass;
 }
 
 
