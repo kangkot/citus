@@ -31,6 +31,10 @@ extern MultiPlan * CreateRouterPlan(Query *originalQuery, Query *query,
 extern MultiPlan * CreateModifyPlan(Query *originalQuery, Query *query,
 									RelationRestrictionContext *restrictionContext,
 									JoinRestrictionContext *joinRestrictionContext);
+extern bool AllRelationsJoinedOnPartitionKey(RelationRestrictionContext
+											 *restrictionContext,
+											 JoinRestrictionContext *
+											 joinRestrictionContext);
 extern bool RouterSelectQuery(Query *originalQuery,
 							  RelationRestrictionContext *restrictionContext,
 							  List **placementList, uint64 *anchorShardId,

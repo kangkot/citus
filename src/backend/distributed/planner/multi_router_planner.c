@@ -89,10 +89,6 @@ static MultiPlan * CreateInsertSelectRouterPlan(Query *originalQuery,
 												restrictionContext,
 												JoinRestrictionContext *
 												joinRestrictionContext);
-static bool AllRelationsJoinedOnPartitionKey(RelationRestrictionContext
-											 *restrictionContext,
-											 JoinRestrictionContext *
-											 joinRestrictionContext);
 static List * PartitionKeyEquivalenceClassList(List *varEquivalenceClassList);
 static uint32 ReferenceRelationCount(RelationRestrictionContext *restrictionContext);
 static List * GenerateVarEquivalencesForRelationRestrictions(RelationRestrictionContext
